@@ -1,0 +1,21 @@
+{
+  "schema_version": "2.0.0",
+  "enclave_name": "nona_enclave",
+  "target_architecture": "aarch64-unknown-linux-musl",
+  "container_platform": "linux/arm64",
+  "source_date_epoch": 1700000000,
+  "binary_size_bytes": 20438957,
+  "max_memory_ceiling_mb": 16,
+  "vsock_port": 5005,
+  "measurements": {
+    "hash_algorithm": "SHA-384",
+    "PCR0": "c60fa30619088241063fa14e2d27cdf67057070d55128f08628c6d8d106ef34144b0bfe02e6fdef8691ac349775712ea",
+    "PCR1": "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03",
+    "PCR2": "0311d3e16b6c2dcf7755110ba1bc558daffe26d99fc65bf585b56dbe0ff8d7b5a7db859e6c6c8d373df54a86c3d2b3e4"
+  },
+  "attestation_binding": {
+    "curve": "secp256k1",
+    "key_format": "SEC 1 Compressed (33 bytes)",
+    "user_data_field": "ephemeral_public_key"
+  }
+}

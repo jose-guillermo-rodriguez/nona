@@ -1,0 +1,28 @@
+[package]
+name = "nona-core-fuzz"
+version = "0.1.0"
+authors = ["Nona Contributors"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nona-core]
+path = ".."
+features = ["std"]
+
+[[bin]]
+name = "fuzz_wire_dispatch"
+path = "fuzz_targets/fuzz_wire_dispatch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ingest"
+path = "fuzz_targets/fuzz_ingest.rs"
+test = false
+doc = false

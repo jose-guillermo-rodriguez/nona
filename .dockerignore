@@ -1,0 +1,8 @@
+target/
+.git/
+.substrate_env/
+.runtime/
+.vscode/
+*.swp
+*~
+.DS_Store

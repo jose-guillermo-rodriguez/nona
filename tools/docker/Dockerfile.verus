@@ -1,0 +1,53 @@
+# Copyright (c) 2026 Nona Contributors.
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+#
+# Pinned Ubuntu 24.04 LTS Noble Numbat base image (providing glibc 2.39 + libstdc++ 3.4.32)
+# Hermetic Formal Verification Environment for Verus SMT Engine
+FROM docker.io/library/ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG VERUS_VERSION=0.2026.10.18.7d82994
+ARG RUST_TOOLCHAIN=1.99.1-x86_64-unknown-linux-gnu
+
+# 1. Install runtime prerequisites and build libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    unzip \
+    libstdc++6 \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Install Rustup and the exact pinned toolchain required by the Verus runtime
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV CARGO_HOME=/opt/rust/cargo
+ENV PATH="/opt/rust/cargo/bin:${PATH}"
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y \
+    --no-modify-path \
+    --default-toolchain "${RUST_TOOLCHAIN}" \
+    --profile minimal
+
+# 3. Install pinned Verus SMT verification engine and bundled Z3 solver
+RUN mkdir -p /opt/verus && \
+    ARCH=$(uname -m) && \
+    URL="https://github.com/verus-lang/verus/releases/download/release%2F${VERUS_VERSION}/verus-${VERUS_VERSION}-x86-linux.zip" && \
+    curl -sSL "$URL" -o /tmp/verus.zip && \
+    unzip -q /tmp/verus.zip -d /opt/verus && \
+    rm /tmp/verus.zip
+
+# 4. Export Verus binaries and libraries to PATH and linker paths
+ENV VERUS_DIR=/opt/verus/verus-x86-linux
+ENV VERUS_Z3_PATH=/opt/verus/verus-x86-linux/z3
+ENV PATH="${VERUS_DIR}:/usr/local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${VERUS_DIR}:${LD_LIBRARY_PATH:-}"
+
+RUN ln -sf "${VERUS_DIR}/verus" /usr/local/bin/verus && \
+    ln -sf "${VERUS_DIR}/z3" /usr/local/bin/z3
+
+WORKDIR /volume
+
+# Default invocation executes the verification suite across repository sources
+CMD ["/volume/tools/run_verus_safe.sh", "--native-host"]

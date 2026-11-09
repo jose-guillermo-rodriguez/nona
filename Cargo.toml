@@ -1,0 +1,153 @@
+[package]
+name = "nona-core"
+version = "1.0.0"
+edition = "2021"
+authors = ["Jose Guillermo Rodriguez <jose-guillermo-rodriguez@users.noreply.github.com>"]
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "nona_core"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Zero dynamic allocation guarantees apply strictly to #![no_std] targets built with --no-default-features.
+default = []
+std = []
+host-defense = []
+panic_on_lock_failure = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus)', 'cfg(feature, values("panic_on_lock_failure", "host-defense"))'] }
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+zeroize = { version = "1.8", default-features = false, features = ["zeroize_derive"] }
+
+[profile.dev]
+panic = "abort"
+
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[test]]
+name = "test_c_abi"
+path = "tests/integration/test_c_abi.rs"
+harness = false
+[[bin]]
+name = "nona_enclave"
+path = "src/bin/nona_enclave.rs"
+required-features = ["std"]
+test = false
+doc = false
+
+[[bench]]
+name = "engine_benchmarks"
+harness = false
+
+[[bin]]
+name = "nona"
+path = "src/bin/nona.rs"
+required-features = ["std"]
+test = false
+doc = false
+
+[[test]]
+name = "test_cli"
+path = "tests/integration/test_cli.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_wycheproof"
+path = "tests/integration/test_wycheproof.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "fuzz_wire_dispatch"
+path = "fuzz/fuzz_targets/fuzz_wire_dispatch.rs"
+required-features = ["std"]
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ingest"
+path = "fuzz/fuzz_targets/fuzz_ingest.rs"
+required-features = ["std"]
+test = false
+doc = false
+
+[[test]]
+name = "test_fuzz_smoke"
+path = "tests/integration/test_fuzz_smoke.rs"
+required-features = ["std"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+large_stack_frames = "deny" 
+cast_ptr_alignment = "deny"
+ref_as_ptr = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+inline_always = "allow"
+unreadable_literal = "allow"
+many_single_char_names = "allow"
+cast_lossless = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
+too_many_lines = "allow"
+items_after_statements = "allow"
+wildcard_imports = "allow"
+return_self_not_must_use = "allow"
+used_underscore_binding = "allow"
+pub_underscore_fields = "allow"
+bool_to_int_with_if = "allow"
+explicit_iter_loop = "allow"
+ptr_cast_constness = "allow"
+decimal_bitwise_operands = "allow"
+ignored_unit_patterns = "allow"
+elidable_lifetime_names = "allow"
+verbose_bit_mask = "allow"
+module_name_repetitions = "allow"
+unused_self = "allow"
+[[test]]
+name = "test_timing_boundaries"
+path = "tests/integration/test_timing_boundaries.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_host_enclave_integration"
+path = "tests/integration/test_host_enclave_integration.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_concurrency"
+path = "tests/integration/test_concurrency.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_transactional_ingest"
+path = "tests/integration/test_transactional_ingest.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_arena_miri"
+path = "tests/integration/test_arena_miri.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_crypto_boundaries"
+path = "tests/integration/test_crypto_boundaries.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_entropy"
+path = "tests/integration/test_entropy.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_field_differential"
+path = "tests/integration/test_field_differential.rs"
+required-features = ["std"]

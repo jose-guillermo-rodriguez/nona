@@ -1,0 +1,241 @@
+name: Nona Core Engine CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: 1700000000
+
+jobs:
+  # ==========================================================================
+  # JOB 0: #![no_std] Bare-Metal Compilation & Symbol Leak Gate
+  # ==========================================================================
+  nostd-baremetal-and-symbol-leak:
+    name: Pure #![no_std] Bare-Metal & Zero-Leak Gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Configure Rust Toolchain & Target
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --target x86_64-unknown-none
+          rustup default 1.98.0
+          rustup target add x86_64-unknown-none
+
+      - name: Verify Bare-Metal #![no_std] Target Compilation
+        run: |
+          echo "[CI] Compiling core substrate for x86_64-unknown-none (no_std)..."
+          cargo check --no-default-features --target x86_64-unknown-none
+          echo "[CI] Compiling pure #![no_std] integration test binary for bare metal..."
+          RUSTFLAGS="-C panic=abort" cargo test --test test_c_abi --no-default-features --no-run --target x86_64-unknown-none
+
+      - name: Execute Pure #![no_std] Integration Test Suite
+        run: |
+          echo "[CI] Executing pure #![no_std] freestanding integration test harness..."
+          RUSTFLAGS="-C panic=abort" cargo test --test test_c_abi --no-default-features
+
+      - name: Execute Executable Documentation Tests
+        run: |
+          echo "[CI] Executing cargo doc test suite..."
+          cargo test --doc --features std
+
+      - name: Build Pure #![no_std] Release Static Library
+        run: |
+          cargo build --release --lib --no-default-features
+
+      - name: Host Zero-Heap & Dynamic Symbol Leak Audit
+        run: |
+          LIB_PATH="target/release/libnona_core.a"
+          echo "[CI] Scanning for leaked allocator and dynamic symbols in ${LIB_PATH}..."
+          HEAP_SYMBOLS=$(nm -u "$LIB_PATH" 2>/dev/null | grep -iE "(malloc|free|realloc|calloc|__rust_alloc)" || true)
+          if [ -n "$HEAP_SYMBOLS" ]; then
+            echo "[SECURITY ERROR] Leaked dynamic allocation symbols detected in static archive:"
+            echo "$HEAP_SYMBOLS"
+            exit 1
+          fi
+          echo "[+] Verified: 0 dynamic allocation symbols found in staticlib."
+
+  # ==========================================================================
+  # JOB 1: Formal SMT Verification (Verus Engine)
+  # ==========================================================================
+  formal-verification:
+    name: Verus Formal SMT Verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Verus Compiler Dependency
+        run: |
+          rustup toolchain install 1.99.1-x86_64-unknown-linux-gnu --profile minimal
+
+      - name: Cache Verus & Z3 Solver Toolchain
+        id: cache-verus
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.verus
+            ~/.cargo
+            target/verus_cache
+          key: verus-engine-2026-ubuntu-24.04
+
+      - name: Install Verus SMT Engine
+        if: steps.cache-verus.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.verus
+          VERUS_TAG="0.2026.10.18.7d82994"
+          echo "[CI] Fetching Verus engine release: ${VERUS_TAG}"
+          curl -sSL "https://github.com/verus-lang/verus/releases/download/release%2F${VERUS_TAG}/verus-${VERUS_TAG}-x86-linux.zip" -o /tmp/verus.zip
+          unzip -q /tmp/verus.zip -d ~/.verus
+          chmod +x ~/.verus/verus* ~/.verus/z3* 2>/dev/null || true
+
+      - name: Configure Verus Environment
+        run: |
+          echo "$HOME/.verus" >> $GITHUB_PATH
+          echo "VERUS_Z3_PATH=$HOME/.verus/z3" >> $GITHUB_ENV
+          echo "NONA_RUNTIME_DIR=$HOME/.verus" >> $GITHUB_ENV
+
+      - name: Execute Verus Formal Verification Suite
+        run: |
+          chmod +x ./tools/run_verus_safe.sh
+          ./tools/run_verus_safe.sh --native-host
+
+  # ==========================================================================
+  # JOB 2: Static Musl Compilation & Zero-Heap Dynamic Symbol Audit
+  # ==========================================================================
+  musl-static-and-zero-heap:
+    name: Musl Build & Zero-Heap Audit (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+            podman_target: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+            podman_target: aarch64
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Podman and QEMU User Emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman qemu-user-static binfmt-support binutils binutils-aarch64-linux-gnu
+          sudo systemctl restart systemd-binfmt 2>/dev/null || true
+
+      - name: Deterministic Enclave Build (Hermetic Container)
+        run: |
+          chmod +x ./tools/build_nitro_eif.sh
+          ./tools/build_nitro_eif.sh --target ${{ matrix.podman_target }} --force-cross
+
+      - name: Zero-Heap Allocation Symbol Audit (nm -u Gate)
+        run: |
+          ENCLAVE_BIN="target/enclave/nona_enclave_musl_${{ matrix.arch }}"
+          if [ ! -f "$ENCLAVE_BIN" ]; then
+            echo "[ERROR] Enclave binary $ENCLAVE_BIN missing"
+            exit 1
+          fi
+
+          NM_TOOL="nm"
+          if [ "${{ matrix.arch }}" = "aarch64" ] && command -v aarch64-linux-gnu-nm &>/dev/null; then
+            NM_TOOL="aarch64-linux-gnu-nm"
+          fi
+
+          echo "[CI] Scanning dynamic symbols in $ENCLAVE_BIN using ${NM_TOOL}..."
+          DYNAMIC_ALLOCS=$("$NM_TOOL" -u "$ENCLAVE_BIN" 2>&1 | grep -E "(malloc|free|realloc|calloc|__rust_alloc)" || true)
+          if [ -n "$DYNAMIC_ALLOCS" ]; then
+            echo "[SECURITY ERROR] Dynamic heap allocations detected in #![no_std] substrate:"
+            echo "$DYNAMIC_ALLOCS"
+            exit 1
+          fi
+          echo "[+] Verified: 0 dynamic allocation symbols found in binary."
+
+      - name: Enclave Footprint Ceiling Audit (< 16 MB)
+        run: |
+          BIN_SIZE=$(stat -c%s "target/enclave/nona_enclave_musl_${{ matrix.arch }}")
+          echo "[CI] Binary size: ${BIN_SIZE} bytes"
+          if [ "$BIN_SIZE" -gt 16777216 ]; then
+            echo "[FATAL] Enclave binary exceeded 16 MB memory ceiling: ${BIN_SIZE} bytes"
+            exit 1
+          fi
+
+      - name: Validate Release Artifact Manifests
+        run: |
+          MANIFEST="manifests/enclave_manifest_${{ matrix.arch }}.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "[ERROR] Manifest file $MANIFEST does not exist"
+            exit 1
+          fi
+          echo "[+] Manifest Contents for ${{ matrix.arch }}:"
+          cat "$MANIFEST"
+
+  # ==========================================================================
+  # JOB 3: SIMD Vector Emulation & Target Compilation Gate
+  # ==========================================================================
+  simd-vector-emulation:
+    name: QEMU AVX2 Vector Emulation & AVX-512 Build Gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install QEMU & Toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user qemu-user-static build-essential gcc-multilib
+          if ! command -v qemu-x86_64 &>/dev/null && command -v qemu-x86_64-static &>/dev/null; then
+            sudo ln -sf "$(command -v qemu-x86_64-static)" /usr/local/bin/qemu-x86_64
+          fi
+
+      - name: Install Rust Nightly Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Verify AVX-512F & AVX-512BW Substrate Compilation
+        run: |
+          echo "[CI] Verifying AVX-512 compilation..."
+          RUSTFLAGS="-C target-cpu=cannonlake -C target-feature=+avx512f,+avx512bw"             cargo check --release --frozen --features std
+
+      - name: Compile Test Harness with AVX2 Flags
+        run: |
+          echo "[CI] Compiling full test matrix with AVX2 vector features..."
+          RUSTFLAGS="-C target-feature=+avx2"             cargo test --no-run --release --frozen --features std
+
+      - name: Execute Full Test Matrix under QEMU AVX2 Emulation
+        run: |
+          echo "[CI] Executing all compiled test binaries under QEMU with -cpu Haswell (AVX2)..."
+          TEST_COUNT=0
+          for test_bin in $(find target/release/deps -maxdepth 1 -type f -executable ! -name "*.*"); do
+            bin_name=$(basename "$test_bin")
+            # Skip application and daemon binaries
+            if [[ "$bin_name" =~ ^nona-[0-9a-f]+$ ]] || [[ "$bin_name" =~ ^nona_enclave-[0-9a-f]+$ ]] || [[ "$bin_name" =~ ^build_script_build-[0-9a-f]+$ ]]; then
+              continue
+            fi
+            # Skip micro-architectural timing side-channel test under QEMU software emulation
+            # (QEMU TCG software JIT introduces artificial timer jitter; timing neutrality is audited on physical silicon in audit.yml)
+            if [[ "$bin_name" =~ ^test_timing_boundaries-[0-9a-f]+$ ]]; then
+              echo "  [-] Skipping hardware timing harness under QEMU software emulation: ${bin_name} (audited in audit.yml)"
+              continue
+            fi
+            # Verify executable is an authentic Rust test harness
+            if qemu-x86_64 -cpu Haswell "$test_bin" --list &>/dev/null; then
+              echo "  [>] Executing test suite: ${bin_name} under qemu-x86_64 -cpu Haswell"
+              qemu-x86_64 -cpu Haswell "$test_bin"
+              TEST_COUNT=$((TEST_COUNT + 1))
+            fi
+          done
+          if [ "$TEST_COUNT" -eq 0 ]; then
+            echo "[ERROR] No executable test artifacts found in target/release/deps"
+            exit 1
+          fi
+          echo "[+] Successfully verified $TEST_COUNT test suites under QEMU AVX2 emulation."
+

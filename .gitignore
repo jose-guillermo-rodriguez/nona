@@ -1,0 +1,26 @@
+/target/*
+/tools/nona-cli/target
+/sdks/python/target
+.substrate_env/
+.vscode/
+*.code-workspace
+*.a
+*.so
+*.dylib
+*.dll
+*.o
+*.out
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+*.eif
+*.tar
+*.iso
+
+# Ephemeral build logs, backups, and packaging artifacts
+*.bak
+*.orig
+*.log
+!proofs/*.log
+!vendor/**

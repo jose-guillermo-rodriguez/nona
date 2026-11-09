@@ -1,0 +1,46 @@
+# ============================================================================
+# Stage 1: Hermetic musl static compilation
+# ============================================================================
+ARG BUILDER_IMAGE=docker.io/clux/muslrust@sha256:500d50571f9f83d467481cbaf58cab6d711700047d0e69b73a1caadc23358abd
+ARG RUNTIME_IMAGE=docker.io/library/alpine@sha256:c6b073f8e9e58d881f6ffba6ebf3b9ebd60b9e7d6e8337018c0e68bb5c356873
+
+FROM ${BUILDER_IMAGE} AS builder
+
+ARG SOURCE_DATE_EPOCH=1700000000
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV RUSTFLAGS="-C link-arg=-lc -C target-feature=+crt-static --remap-path-prefix=/volume=/nona"
+
+WORKDIR /volume
+
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ ./.cargo/
+COPY include/ ./include/
+COPY src/ ./src/
+COPY benches/ ./benches/
+COPY tests/ ./tests/
+COPY fuzz/ ./fuzz/
+COPY vendor/ ./vendor/
+
+RUN cargo build --release --bin nona_enclave --features="std" --frozen --offline
+
+RUN BIN_PATH=$(find target -type f -name nona_enclave | grep release | head -n 1) && \
+    echo "[BUILD] Staging static binary from: ${BIN_PATH}" && \
+    strip --strip-all "${BIN_PATH}" && \
+    touch -d "@${SOURCE_DATE_EPOCH}" "${BIN_PATH}" && \
+    cp "${BIN_PATH}" /volume/nona_enclave_static
+
+# ============================================================================
+# Stage 2: Sealed Minimal Enclave Runtime (< 16 MB)
+# ============================================================================
+FROM ${RUNTIME_IMAGE}
+
+ARG SOURCE_DATE_EPOCH=1700000000
+WORKDIR /
+
+COPY --from=builder /volume/nona_enclave_static /bin/nona_enclave
+COPY init.sh /init
+
+RUN chmod +x /init && chmod +x /bin/nona_enclave && \
+    touch -d "@${SOURCE_DATE_EPOCH}" /init /bin/nona_enclave
+
+CMD ["/init"]

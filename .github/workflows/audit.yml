@@ -1,0 +1,58 @@
+name: Nona Side-Channel & Sanitizer Audit
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * 0'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  timing-neutrality:
+    name: Timing Invariance Audit (|t| < 4.5)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Native Build Prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc
+
+      - name: Build C Static Library
+        run: cargo build --release --frozen
+
+      - name: Compile Timing Runner Harness
+        run: |
+          gcc -O3 -std=c99 -Wall -Wextra \
+            -Iinclude \
+            tests/integration/timing_runner.c \
+            -Ltarget/release -lnona_core -lpthread -ldl -lm \
+            -o /tmp/timing_runner
+
+      - name: "Execute Interleaved Welch's t-Test (100,000 samples)"
+        run: |
+          echo "[AUDIT] Executing 100,000 interleaved timing samples..."
+          /tmp/timing_runner
+
+  sanitizers:
+    name: Memory Sanitizer Suite (ASan & UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Clang & LLVM Sanitizer Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - name: Execute Multi-Target Dynamic Sanitizer Matrix
+        run: |
+          chmod +x ./tools/run_sanitizers.sh
+          ./tools/run_sanitizers.sh
