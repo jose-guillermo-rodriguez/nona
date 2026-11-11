@@ -2665,6 +2665,31 @@ pub proof fn lemma_swap_bits(a: u64, b: u64, swap: u64)
     })) by(bit_vector);
 }
 
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Bit-vector SAT proof lemma verifying branchless constant-time conditional move.
+pub proof fn lemma_cmov_bits(a: u64, b: u64, condition: u64)
+    requires
+        condition == 0 || condition == 1,
+    ensures
+        ({
+            let mask = 0u64.wrapping_sub(condition);
+            let temp = mask & (a ^ b);
+            let next_a = a ^ temp;
+            (condition == 1 ==> next_a == b) &&
+            (condition == 0 ==> next_a == a)
+        })
+{
+    assert(({
+        let mask = 0u64.wrapping_sub(condition);
+        let temp = mask & (a ^ b);
+        let next_a = a ^ temp;
+        (condition == 1 ==> next_a == b) &&
+        (condition == 0 ==> next_a == a)
+    })) by(bit_vector);
+}
+
 /// Satisfies [FR-06-PSIMALG]
 /// Satisfies [FR-12-FORMALSPEC]
 /// Machine-checked bit-vector proof lemma connecting branchless bit extraction
@@ -3741,27 +3766,33 @@ impl FieldElement {
             condition == 0 || condition == 1,
         ensures
             final(self).is_valid(),
+            condition == 0 ==> final(self).to_nat() == old(self).to_nat(),
+            condition == 1 ==> final(self).to_nat() == other.to_nat(),
     {
-        let mask = if condition == 1 { 0xFFFFFFFFFFFFFFFF_u64 } else { 0_u64 };
-        let mut i: usize = 0;
-        while i < 4
-            invariant
-                0 <= i <= 4,
-                condition == 0 || condition == 1,
-                mask == (if condition == 1 { 0xFFFFFFFFFFFFFFFF_u64 } else { 0_u64 }),
-            decreases 4 - i
-        {
-            let diff = self.limbs[i] ^ other.limbs[i];
-            self.limbs[i] = self.limbs[i] ^ (diff & mask);
-            i += 1;
-        }
+        let mask = 0u64.wrapping_sub(condition);
+
+        let old_s0 = self.limbs[0];
+        proof { lemma_cmov_bits(old_s0, other.limbs[0], condition); }
+        let temp0 = mask & (self.limbs[0] ^ other.limbs[0]);
+        self.limbs[0] ^= temp0;
+
+        let old_s1 = self.limbs[1];
+        proof { lemma_cmov_bits(old_s1, other.limbs[1], condition); }
+        let temp1 = mask & (self.limbs[1] ^ other.limbs[1]);
+        self.limbs[1] ^= temp1;
+
+        let old_s2 = self.limbs[2];
+        proof { lemma_cmov_bits(old_s2, other.limbs[2], condition); }
+        let temp2 = mask & (self.limbs[2] ^ other.limbs[2]);
+        self.limbs[2] ^= temp2;
+
+        let old_s3 = self.limbs[3];
+        proof { lemma_cmov_bits(old_s3, other.limbs[3], condition); }
+        let temp3 = mask & (self.limbs[3] ^ other.limbs[3]);
+        self.limbs[3] ^= temp3;
+
         proof {
-            if condition == 0 {
-                assume(self.limbs =~= old(self).limbs);
-            } else {
-                assume(self.limbs =~= other.limbs);
-            }
-            assume(self.is_valid());
+            reveal(FieldElement::to_nat);
         }
     }
 

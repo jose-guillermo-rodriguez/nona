@@ -36,7 +36,7 @@ By enforcing external, non-negotiable mathematical proofs and machine-level bina
 |     HOST / NATIVE DOMAIN              |   |     HERMETIC CONTAINER DOMAIN         |
 |     (Zero Container Overhead)         |   |     (Podman / Docker Isolation)       |
 +---------------------------------------+   +---------------------------------------+
-| Tier 1: Formal SMT Proofs (122/122)   |   | Tier 2: -Z emit-stack-sizes musl      |
+| Tier 1: Formal SMT Proofs (123/123)   |   | Tier 2: -Z emit-stack-sizes musl      |
 | Tier 2: Zero-Heap Symbol Audit        |   | Tier 3: 100k Cycle dudect Empirical   |
 | Tier 2: Sub-4 KiB Mach-O Stack Check  |   | Tier 4: Real-Kernel Signal Traps      |
 | Tier 2: C-ABI Bijectivity Gates 1-5   |   | Tier 4: Database C-UDF Frame Purge    |
@@ -48,9 +48,9 @@ By enforcing external, non-negotiable mathematical proofs and machine-level bina
 
 ### Tier 1: Mathematical Truth (Formal SMT Proofs)
 Core algorithms are not merely tested against vectors—they are mathematically proven correct using Verus and Z3:
-- **122 / 122 SMT Targets Machine-Checked:** Machine-checked proofs comprising 46 mathematical lemmas and 76 inductive function contracts/state invariants covering secp256k1 finite field arithmetic, constant-time scalar multiplication loops, 4-round Feistel permutations over $\mathbb{Z}_{2^{64}}$ (bijectivity, injectivity, and surjectivity), static arena 64-byte pointer alignment, and sequence monotonicity.
+- **123 / 123 SMT Targets Machine-Checked:** Machine-checked proofs comprising 47 mathematical lemmas and 76 inductive function contracts/state invariants covering secp256k1 finite field arithmetic, constant-time scalar multiplication loops, 4-round Feistel permutations over $\mathbb{Z}_{2^{64}}$ (bijectivity, injectivity, and surjectivity), static arena 64-byte pointer alignment, and sequence monotonicity.
 - **State-Space Totality:** Proves total absence of arithmetic overflow, underflow, out-of-bounds indexing, and panics across all 2^256 inputs.
-- **Proof Hygiene & Zero-Axiom Invariant (Gate 10):** Mechanical pre-commit scanners reject any raw SMT `assume(...)` directives across the verification boundary, guaranteeing all 122 inductive targets remain strictly machine-checked without unverified assumptions.
+- **Proof Hygiene & Zero-Axiom Invariant (Gate 10):** Mechanical pre-commit scanners reject any raw SMT `assume(...)` directives across the verification boundary, guaranteeing all 123 inductive targets remain strictly machine-checked without unverified assumptions.
 
 ### Tier 2: Machine-Level & Binary Invariants
 High-assurance software verifies the emitted machine code directly:

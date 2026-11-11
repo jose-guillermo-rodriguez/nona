@@ -31,7 +31,7 @@ Nona cryptographic core eliminates operating system and runtime dependencies:
 
 Nona formal proofs are machine-checked via Verus using Z3 with an explicit resource limit budget (rlimit = 1,000,000):
 
-- src/psi.rs (92 SMT Targets: 30 Lemmas + 62 Contracts): Solinas reduction, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, field arithmetic, non-overflow (total 122 global SMT targets: 46 inductive lemmas + 76 verified contracts)
+- src/psi.rs (93 SMT Targets: 31 Lemmas + 62 Contracts): Solinas reduction, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, field arithmetic, non-overflow (total 123 global SMT targets: 47 inductive lemmas + 76 verified contracts)
 - src/obfuscation.rs (22 SMT Targets: 14 Lemmas + 8 Contracts): 4-round Feistel bijection, non-identity permutations, key diffusion (VERIF-01)
 - src/normalization.rs (4 SMT Targets: 4 Contracts): Monomorphic 64-byte bounded transformations, memory safety
 - src/allocator.rs (1 SMT Target: 1 Contract): Pointer alignment invariants and static arena safety

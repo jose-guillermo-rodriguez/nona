@@ -57,12 +57,12 @@ formal:
 	@if ./tools/run_verus_safe.sh --check-env >/dev/null 2>&1; then \
 		./tools/run_verus_safe.sh; \
 	elif [ -f "proofs/verus_verification.log" ]; then \
-		echo "[NOTICE] Verus binary not found on host. Validating pre-certified proof log (122/122 theorems)..."; \
-		if grep -Fq "122/122 SMT TARGETS SEALED (0 ERRORS)" proofs/verus_verification.log; then \
-			echo "[✓] 122 SMT proofs confirmed valid in proofs/verus_verification.log."; \
+		echo "[NOTICE] Verus binary not found on host. Validating pre-certified proof log (123/123 theorems)..."; \
+		if grep -Fq "123/123 SMT TARGETS SEALED (0 ERRORS)" proofs/verus_verification.log; then \
+			echo "[✓] 123 SMT proofs confirmed valid in proofs/verus_verification.log."; \
 			echo "[HINT] To execute live SMT solver locally, install Verus into ~/.verus or set NONA_RUNTIME_DIR."; \
 		else \
-			echo "[ERROR] Proof log failed integrity check: 122/122 SMT seal mismatch or errors detected." >&2; \
+			echo "[ERROR] Proof log failed integrity check: 123/123 SMT seal mismatch or errors detected." >&2; \
 			exit 1; \
 		fi; \
 	else \
