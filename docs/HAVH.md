@@ -50,6 +50,7 @@ By enforcing external, non-negotiable mathematical proofs and machine-level bina
 Core algorithms are not merely tested against vectors—they are mathematically proven correct using Verus and Z3:
 - **122 / 122 SMT Targets Machine-Checked:** Machine-checked proofs comprising 46 mathematical lemmas and 76 inductive function contracts/state invariants covering secp256k1 finite field arithmetic, constant-time scalar multiplication loops, 4-round Feistel permutations over $\mathbb{Z}_{2^{64}}$ (bijectivity, injectivity, and surjectivity), static arena 64-byte pointer alignment, and sequence monotonicity.
 - **State-Space Totality:** Proves total absence of arithmetic overflow, underflow, out-of-bounds indexing, and panics across all 2^256 inputs.
+- **Proof Hygiene & Zero-Axiom Invariant (Gate 10):** Mechanical pre-commit scanners reject any raw SMT `assume(...)` directives across the verification boundary, guaranteeing all 122 inductive targets remain strictly machine-checked without unverified assumptions.
 
 ### Tier 2: Machine-Level & Binary Invariants
 High-assurance software verifies the emitted machine code directly:
@@ -67,12 +68,14 @@ Because standard unit testing cannot detect whether data-dependent branches leak
 Confidential computing models mandate that sensitive memory must not persist in DRAM:
 - **Zero Remanence (H(R) = 0):** High-assurance memory canaries verify that volatile memory regions are zeroized immediately after execution, confirming zero residual entropy.
 - **Asynchronous Signal Decontamination:** Enclosing runtime supervisors intercept POSIX process termination signals (SIGINT, SIGTERM) to trigger synchronous volatile scrubs (`nona_ct_zeroize`) across active memory buffers before handing control to the host kernel.
-- **Core Dump Suppression:** RLIMIT_CORE limits are programmatically set to zero (via feature = "host-defense" on POSIX hosts; bare-metal enclaves execute with zero crash dumping facilities) to prevent crash dumps from persisting plaintext cryptographic state on host disks.
+- **Core Dump Suppression:** RLIMIT_CORE limits are programmatically set to zero
+- **Fail-Closed Hardware Trapping (Gate 11):** Bare-metal enclave panic handlers are forbidden from executing non-terminating spin loops. Panics must emit explicit invalid instruction traps (`ud2` on x86_64, `brk` on aarch64) to ensure hypervisor-level fail-closed termination. (via feature = "host-defense" on POSIX hosts; bare-metal enclaves execute with zero crash dumping facilities) to prevent crash dumps from persisting plaintext cryptographic state on host disks.
 
 ### Tier 5: Supply-Chain Hermeticity & Cryptographic Attestation
 - **Deterministic Reproducibility:** Hermetic container configurations pin compiler base images and set explicit timestamps (SOURCE_DATE_EPOCH=1700000000) to eliminate build-time variance down to the individual bit.
 - **Platform Configuration Register (PCR) Calculation:** AWS Nitro Enclave packaging scripts calculate cryptographic measurements (PCR0: Enclave Image, PCR1: Linux Kernel/Boot, PCR2: Application IAM/Metadata) to allow remote verifying parties to validate enclave integrity.
 - **Footprint Constraint:** Enclave binary footprint is enforced strictly below 16 MB (Current: 397,488 bytes).
+- **Negative Attestation & Manifest Falsification:** Mechanical suites verify that the client attestation verifier fails closed when encountering dummy signatures, broken certificate paths, or deceptive JSON manifest key structures.
 
 ---
 

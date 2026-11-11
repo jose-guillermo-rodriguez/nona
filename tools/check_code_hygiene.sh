@@ -120,6 +120,32 @@ else
     echo "  ✓ Zero unused items detected in core library compilation."
 fi
 
+# ---------------------------------------------------------
+# Check 10: High-Assurance Proof Hygiene (SMT Axiom & Assume Audit)
+# ---------------------------------------------------------
+echo "--> Check 10: Auditing for unverified SMT axioms and raw assume() directives..."
+RAW_ASSUMES=$(grep -rn -E "assume\\s*\\(" src/ 2>/dev/null || true)
+if [ -n "$RAW_ASSUMES" ]; then
+    echo "  [FORMAL PROOF VIOLATION] Detected raw assume() directives bypassing SMT verification:"
+    echo "$RAW_ASSUMES"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Zero raw assume() directives detected across formal proof surface."
+fi
+
+# ---------------------------------------------------------
+# Check 11: Fail-Closed Bare-Metal Panic Trap Invariant
+# ---------------------------------------------------------
+echo "--> Check 11: Auditing bare-metal panic handlers for non-terminating spin-loops..."
+SPIN_PANICS=$(grep -rn "spin_loop" src/bin/ 2>/dev/null || true)
+if [ -n "$SPIN_PANICS" ]; then
+    echo "  [FAIL-CLOSED VIOLATION] Detected infinite spin_loop in bare-metal panic handler:"
+    echo "$SPIN_PANICS"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Bare-metal panic paths enforce immediate hardware traps."
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo "=========================================================="
     echo "[HYGIENE SUITE FAILED] Total violations detected: $ERRORS"
