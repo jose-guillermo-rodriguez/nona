@@ -189,7 +189,12 @@ pub unsafe fn query_hardware_attestation(
         return NONA_ERR_NSM_IOCTL_FAILED;
     }
 
-    doc_out.actual_len = raw_msg.response.len as usize;
+    let resp_len = raw_msg.response.len as usize;
+    if resp_len == 0 || resp_len > ATTESTATION_MAX_DOC_SIZE {
+        return NONA_ERR_ATTEST_OVERFLOW;
+    }
+
+    doc_out.actual_len = resp_len;
     0
 }
 

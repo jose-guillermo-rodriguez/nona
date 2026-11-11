@@ -3,7 +3,7 @@
 
 use crate::attestation::{
     derive_compressed_public_key, query_hardware_attestation, AttestationDocumentBuffer,
-    SECP256K1_PUBKEY_COMPRESSED_SIZE,
+    ATTESTATION_MAX_DOC_SIZE, NONA_ERR_ATTEST_OVERFLOW, SECP256K1_PUBKEY_COMPRESSED_SIZE,
 };
 use crate::crypto::{ct_zeroize, sha512_digest};
 use core::mem::size_of;
@@ -617,18 +617,21 @@ pub fn dispatch_frame_with_slot(
 
             let status = unsafe { query_hardware_attestation(&user_data_digest, attestation_doc) };
 
-            let out_len = if status == 0 {
+            let (status, out_len) = if status == 0 {
                 let total_needed = SECP256K1_PUBKEY_COMPRESSED_SIZE + attestation_doc.actual_len;
-                let copy_len = core::cmp::min(total_needed, resp_payload.len());
-                if copy_len >= SECP256K1_PUBKEY_COMPRESSED_SIZE {
+                if total_needed > resp_payload.len()
+                    || attestation_doc.actual_len == 0
+                    || attestation_doc.actual_len > ATTESTATION_MAX_DOC_SIZE
+                {
+                    (NONA_ERR_ATTEST_OVERFLOW, 0)
+                } else {
                     resp_payload[..SECP256K1_PUBKEY_COMPRESSED_SIZE].copy_from_slice(&pubkey);
-                    let doc_copy = copy_len - SECP256K1_PUBKEY_COMPRESSED_SIZE;
-                    resp_payload[SECP256K1_PUBKEY_COMPRESSED_SIZE..copy_len]
-                        .copy_from_slice(&attestation_doc.data[..doc_copy]);
+                    resp_payload[SECP256K1_PUBKEY_COMPRESSED_SIZE..total_needed]
+                        .copy_from_slice(&attestation_doc.data[..attestation_doc.actual_len]);
+                    (0, total_needed as u32)
                 }
-                copy_len as u32
             } else {
-                0
+                (status, 0)
             };
 
             attestation_doc.purge();

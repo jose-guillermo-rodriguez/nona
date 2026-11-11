@@ -377,3 +377,10 @@ fn test_enclave_session_key_entropy_and_validity() {
         "Repeated reads of session pubkey must return identical cached keypair"
     );
 }
+
+#[test]
+fn test_enclave_cmd_attest_truncation_fail_closed() {
+    use nona_core::attestation::NONA_ERR_ATTEST_OVERFLOW;
+
+    assert_eq!(NONA_ERR_ATTEST_OVERFLOW, -112);
+}

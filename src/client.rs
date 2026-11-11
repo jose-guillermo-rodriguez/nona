@@ -351,10 +351,15 @@ impl NonaClient {
                 }
                 return Err(ClientError::HardwareAttestationUnavailable);
             }
+            Err(ClientError::ServerStatusError(-112)) => {
+                return Err(ClientError::AttestationValidationFailed(
+                    "Attestation frame buffer overflow",
+                ));
+            }
             Err(e) => return Err(e),
         };
 
-        if resp.len() < 33 {
+        if resp.len() <= 33 {
             return Err(ClientError::AttestationValidationFailed(
                 "Truncated attestation",
             ));
