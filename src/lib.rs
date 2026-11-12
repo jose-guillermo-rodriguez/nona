@@ -412,7 +412,7 @@ pub unsafe extern "C" fn nona_validate_ffi_bounds(
 pub mod client;
 
 #[cfg(test)]
-mod tests_f26 {
+mod sanitization_boundary_tests {
     use super::*;
 
     #[test]

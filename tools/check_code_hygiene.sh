@@ -146,6 +146,19 @@ else
     echo "  ✓ Bare-metal panic paths enforce immediate hardware traps."
 fi
 
+# ---------------------------------------------------------
+# Check 12: Normative Requirement Tag Allowlist
+# ---------------------------------------------------------
+echo "--> Check 12: Enforcing normative requirement tags..."
+NON_NORMATIVE_TAGS=$(grep -rn -E "\\[[A-Z]+-[0-9]+" src/ tests/ | grep -v -E "\\[FR-[0-9]+" || true)
+if [ -n "$NON_NORMATIVE_TAGS" ]; then
+    echo "  [HYGIENE FAILURE] Non-normative bracketed tags detected (only [FR-XX-...] allowed):"
+    echo "$NON_NORMATIVE_TAGS"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ All bracketed requirement tags conform to normative functional specifications."
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo "=========================================================="
     echo "[HYGIENE SUITE FAILED] Total violations detected: $ERRORS"

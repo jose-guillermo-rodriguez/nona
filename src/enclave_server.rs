@@ -602,8 +602,7 @@ pub fn dispatch_frame_with_slot(
             let mut privkey = [0u8; 32];
             let mut pubkey = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
 
-            // ENCL-02: Cryptographically bind internal session key exclusively.
-            // Attestation must strictly bind the hardware-isolated session key.
+            // Bind hypervisor attestation strictly to the internal enclave session key.
             let (k, q) = get_or_create_session_key();
             privkey.copy_from_slice(&k);
             pubkey.copy_from_slice(&q);

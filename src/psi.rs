@@ -3690,11 +3690,11 @@ impl FieldElement {
     /// Satisfies [FR-12-FORMALSPEC]
     /// Modular multiplication: self * other (mod p), constant-time.
     ///
-    /// # Trusted Computing Base (TCB) Boundary [VERIF-02]
+    /// # Trusted Computing Base (TCB) Boundary
     /// Axiomatic primitive boundary: Non-linear degree-2 multi-limb multiplication
     /// and Solinas reduction modulo p = 2^256 - 2^32 - 977 are formally axiomatized
     /// under #[verifier::external_body]. Dead internal proof annotations, unverified loop
-    /// invariants, and ghost assertions were audited and stripped under VERIF-02 to
+    /// invariants, and ghost assertions were stripped from the axiomatic boundary to
     /// eliminate misleading verification claims and maintain an honest SMT trust surface.
     /// Tracked formally in docs/TCB.md §3.
     #[verifier::external_body]

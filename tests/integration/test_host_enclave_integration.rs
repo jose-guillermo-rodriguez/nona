@@ -194,6 +194,22 @@ fn test_real_dual_transport_client_and_tail_padding() {
 
     let mut client = NonaClient::connect_unix(DEFAULT_UNIX_SOCKET_PATH)
         .expect("Failed to connect to real enclave wire server");
+
+    // Pre-attestation anti-splice verification: channel must reject streaming and blinding
+    let dummy_payload = vec![0x11u8; 96];
+    assert!(
+        matches!(client.blind_stream_chunked(&dummy_payload), Err(nona_core::client::ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail closed on blind_stream_chunked"
+    );
+    assert!(
+        matches!(client.blind_phase1(&dummy_payload), Err(nona_core::client::ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail closed on blind_phase1"
+    );
+    let dummy_chunk = [0x22u8; 128];
+    assert!(
+        matches!(client.ingest_chunk(&dummy_chunk), Err(nona_core::client::ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail closed on ingest_chunk"
+    );
     client.allow_simulation_fallback = true;
     client.allow_simulation_fallback = true;
 
@@ -321,7 +337,7 @@ fn test_cose_cbor_attestation_and_pcr_verification() {
         NonaClient::parse_and_verify_cose_attestation(&no_ca_doc, &expected_digest, manifest_path);
     assert!(no_ca_res.is_err(), "Expected Missing AWS Root CA error");
 
-    // 6. Test Sham Raw Substring Bypass Rejection (F-03 remediation proof)
+    // 6. Test Sham Raw Substring Bypass Rejection
     let mut sham_raw_doc = Vec::new();
     sham_raw_doc.extend_from_slice(b"aws.nitro-enclaves root ca cert header");
     sham_raw_doc.extend_from_slice(&expected_digest);
@@ -383,46 +399,4 @@ fn test_enclave_cmd_attest_truncation_fail_closed() {
     use nona_core::attestation::NONA_ERR_ATTEST_OVERFLOW;
 
     assert_eq!(NONA_ERR_ATTEST_OVERFLOW, -112);
-}
-
-
-#[cfg(feature = "std")]
-#[test]
-fn test_encl02_unattested_channel_splice_rejection() {
-    use nona_core::client::{NonaClient, ClientError, DEFAULT_UNIX_SOCKET_PATH};
-    use nona_core::enclave_server::{run_unix_server, DEFAULT_UNIX_SOCKET};
-    use std::thread;
-    use std::time::Duration;
-
-    let _ = std::fs::remove_file(DEFAULT_UNIX_SOCKET_PATH);
-    thread::spawn(|| unsafe {
-        run_unix_server(DEFAULT_UNIX_SOCKET);
-    });
-    thread::sleep(Duration::from_millis(80));
-
-    let mut client = NonaClient::connect_unix(DEFAULT_UNIX_SOCKET_PATH)
-        .expect("Failed to connect to wire server");
-
-    // Client must refuse streaming or ingestion before attestation (anti-splice)
-    let payload = vec![0x11u8; 96];
-    let blind_err = client.blind_stream_chunked(&payload);
-    assert!(
-        matches!(blind_err, Err(ClientError::AttestationValidationFailed(_))),
-        "Unattested channel must fail-closed on blind_stream_chunked"
-    );
-
-    let single_err = client.blind_phase1(&payload);
-    assert!(
-        matches!(single_err, Err(ClientError::AttestationValidationFailed(_))),
-        "Unattested channel must fail-closed on blind_phase1"
-    );
-
-    let ingest_buf = [0x22u8; 128];
-    let ingest_err = client.ingest_chunk(&ingest_buf);
-    assert!(
-        matches!(ingest_err, Err(ClientError::AttestationValidationFailed(_))),
-        "Unattested channel must fail-closed on ingest_chunk"
-    );
-
-    let _ = std::fs::remove_file(DEFAULT_UNIX_SOCKET_PATH);
 }

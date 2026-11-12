@@ -182,13 +182,13 @@ const LAMBDA_L1: u64 = 0x4551231950b75fc4;
 /// Satisfies [FR-18-ZEROREM]
 /// Cache-aligned (64-byte) 256-bit secp256k1 scalar field element modulo q.
 ///
-/// # Trusted Computing Base (TCB) Boundary Classification [VERIF-03]
+/// # Trusted Computing Base (TCB) Boundary Classification
 /// High-Assurance Runtime Perimeter (Tier 3): secp256k1 scalar group arithmetic
 /// modulo q and endomorphism reduction (lambda-decomposition) are explicitly scoped
 /// out of the formal SMT inductive verification surface due to non-linear degree-2
 /// reduction decidability limits. Canonicity, non-overflow, and algebraic distributivity
-/// are validated via differential oracle fuzzing (TEST-02), Wycheproof vectors, and
-/// domain boundary suites (TEST-08). Formally cataloged in docs/TCB.md §3 and SPECIFICATION.md §4.5.0.
+/// are validated via differential oracle fuzzing, Wycheproof vectors, and
+/// domain boundary suites. Formally cataloged in docs/TCB.md §3 and SPECIFICATION.md §4.5.0.
 pub struct Scalar {
     pub limbs: [u64; 4],
 }
@@ -725,7 +725,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests_f25 {
+mod adaptive_routing_tests {
     use super::*;
 
     #[test]
