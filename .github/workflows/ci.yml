@@ -177,6 +177,34 @@ jobs:
           echo "[+] Manifest Contents for ${{ matrix.arch }}:"
           cat "$MANIFEST"
 
+      - name: Verify Bit-for-Bit Deterministic Reproducibility & Zero Path Leakage
+        run: |
+          ENCLAVE_BIN="target/enclave/nona_enclave_musl_${{ matrix.arch }}"
+          EIF_BIN="target/enclave/nona_enclave_${{ matrix.arch }}.eif"
+
+          if strings "$ENCLAVE_BIN" | grep -E "(/volume|/opt/cargo|/opt/rustup)"; then
+            echo "[SECURITY ERROR] Unremapped build paths leaked into $ENCLAVE_BIN"
+            exit 1
+          fi
+          echo "[+] Verified: Zero host/builder path leakage in $ENCLAVE_BIN."
+
+          cp "$ENCLAVE_BIN" /tmp/nona_enclave_bin_pass1
+          cp "$EIF_BIN" /tmp/nona_enclave_eif_pass1
+          podman rmi -f "localhost/nona-enclave:${{ matrix.arch }}-v2.0.0" >/dev/null
+
+          ./tools/build_nitro_eif.sh --target ${{ matrix.podman_target }} --force-cross
+
+          cmp -s /tmp/nona_enclave_bin_pass1 "$ENCLAVE_BIN" || {
+            echo "[FATAL] Non-deterministic binary output across clean rebuilds!"
+            exit 1
+          }
+          cmp -s /tmp/nona_enclave_eif_pass1 "$EIF_BIN" || {
+            echo "[FATAL] Non-deterministic EIF package output across clean rebuilds!"
+            exit 1
+          }
+          rm -f /tmp/nona_enclave_bin_pass1 /tmp/nona_enclave_eif_pass1
+          echo "[+] Verified: Bit-for-bit deterministic binary and EIF reproduction confirmed."
+
   # ==========================================================================
   # JOB 3: SIMD Vector Emulation & Target Compilation Gate
   # ==========================================================================

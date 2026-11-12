@@ -7,8 +7,11 @@ ARG RUNTIME_IMAGE=docker.io/library/alpine@sha256:c6b073f8e9e58d881f6ffba6ebf3b9
 FROM ${BUILDER_IMAGE} AS builder
 
 ARG SOURCE_DATE_EPOCH=1700000000
-ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-ENV RUSTFLAGS="-C link-arg=-lc -C target-feature=+crt-static --remap-path-prefix=/volume=/nona"
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    CARGO_INCREMENTAL=0 \
+    TZ=UTC \
+    LC_ALL=C \
+    LANG=C
 
 WORKDIR /volume
 
@@ -21,13 +24,26 @@ COPY tests/ ./tests/
 COPY fuzz/ ./fuzz/
 COPY vendor/ ./vendor/
 
-RUN cargo build --release --bin nona_enclave --features="std" --frozen --offline
+# Append deterministic path-remapping and linker flags onto the base image's
+# target-specific RUSTFLAGS so Cargo never shadows them.
+RUN DET_FLAGS="-C debuginfo=0 -C strip=symbols -C link-arg=-Wl,--build-id=none --remap-path-prefix=/volume=/nona --remap-path-prefix=/opt/cargo=/cargo --remap-path-prefix=/opt/rustup=/rustup" && \
+    export RUSTFLAGS="${RUSTFLAGS:-} ${DET_FLAGS}" && \
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS:--C link-arg=-lc -C target-feature=+crt-static} ${DET_FLAGS}" && \
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS:--C link-self-contained=yes -C linker=rust-lld -C target-feature=+crt-static} ${DET_FLAGS}" && \
+    cargo build --release --bin nona_enclave --features="std" --frozen --offline
 
-RUN BIN_PATH=$(find target -type f -name nona_enclave | grep release | head -n 1) && \
+RUN BIN_PATH="target/${CARGO_BUILD_TARGET}/release/nona_enclave" && \
+    test -f "${BIN_PATH}" || { echo "[FATAL] Expected binary missing at ${BIN_PATH}" >&2; exit 1; } && \
     echo "[BUILD] Staging static binary from: ${BIN_PATH}" && \
-    strip --strip-all "${BIN_PATH}" && \
+    strip --strip-all \
+          --remove-section=.comment \
+          --remove-section=.note.gnu.build-id \
+          --remove-section=.debug_gdb_scripts \
+          "${BIN_PATH}" && \
+    chown 0:0 "${BIN_PATH}" && \
+    chmod 0755 "${BIN_PATH}" && \
     touch -d "@${SOURCE_DATE_EPOCH}" "${BIN_PATH}" && \
-    cp "${BIN_PATH}" /volume/nona_enclave_static
+    cp -p "${BIN_PATH}" /volume/nona_enclave_static
 
 # ============================================================================
 # Stage 2: Sealed Minimal Enclave Runtime (< 16 MB)
@@ -40,7 +56,8 @@ WORKDIR /
 COPY --from=builder /volume/nona_enclave_static /bin/nona_enclave
 COPY init.sh /init
 
-RUN chmod +x /init && chmod +x /bin/nona_enclave && \
+RUN chown 0:0 /init /bin/nona_enclave && \
+    chmod 0755 /init /bin/nona_enclave && \
     touch -d "@${SOURCE_DATE_EPOCH}" /init /bin/nona_enclave
 
 CMD ["/init"]

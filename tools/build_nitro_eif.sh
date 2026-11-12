@@ -133,7 +133,10 @@ fi
 
 echo "[1/4] Building hermetic enclave container image (${IMAGE_TAG})..."
 "$PODMAN_BIN" build \
+    --no-cache \
     --platform "$CONTAINER_PLATFORM" \
+    --source-date-epoch "$SOURCE_DATE_EPOCH" \
+    --rewrite-timestamp \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
     --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
