@@ -119,7 +119,7 @@ if [ -z "$VERUS_BIN" ] || [ ! -x "$VERUS_BIN" ]; then
     exit 1
 fi
 
-# 4. Host Linux ABI & Glibc Version Guard (Radical Efficacy Invariant)
+# 4. Host Linux ABI & Glibc Version Guard
 if [ "$(uname -s)" = "Linux" ] && [ "${NONA_IN_CONTAINER:-0}" != "1" ]; then
     HOST_GLIBC=$(ldd --version 2>/dev/null | head -n 1 | grep -oE "[0-9]+\.[0-9]+" | head -n 1 || echo "0.0")
     if [ "$(printf "%s\n%s\n" "2.39" "$HOST_GLIBC" | sort -V | head -n 1)" != "2.39" ]; then
