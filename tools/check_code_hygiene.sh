@@ -168,16 +168,38 @@ else
 fi
 
 # ---------------------------------------------------------
-# Check 12: Normative Requirement Tag Allowlist
+# Check 12: Closed Positive Allowlist for Normative Requirement Tags
 # ---------------------------------------------------------
-echo "--> Check 12: Enforcing normative requirement tags..."
-NON_NORMATIVE_TAGS=$(grep -rn -E "\\[[A-Z]+-[0-9]+" src/ tests/ | grep -v -E "\\[FR-[0-9]+" || true)
-if [ -n "$NON_NORMATIVE_TAGS" ]; then
-    echo "  [HYGIENE FAILURE] Non-normative bracketed tags detected (only [FR-XX-...] allowed):"
-    echo "$NON_NORMATIVE_TAGS"
+echo "--> Check 12: Enforcing closed positive allowlist for requirement tags (only FR-* permitted)..."
+if ! python3 -c '
+import pathlib, re, sys
+
+TOKEN_RE = re.compile(r"\b[A-Z]{2,}[-_][0-9]+[A-Z0-9_-]*\b")
+ALLOW_RE = re.compile(r"^(FR-[0-9]+(-[A-Z0-9]+)?|TEST-[0-9]+|(SHA|UTF|AVX)-[0-9]+|SWU_[123]P_X)$")
+
+violations = []
+for root in ("src", "tests"):
+    for path in sorted(pathlib.Path(root).rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for m in TOKEN_RE.finditer(line):
+                tok = m.group(0)
+                if not ALLOW_RE.match(tok):
+                    violations.append(f"{path}:{lineno}: {tok} -> {line.strip()}")
+
+if violations:
+    for v in violations:
+        print(f"  [HYGIENE FAILURE] Non-normative tag rejected by positive FR-* allowlist: {v}")
+    sys.exit(1)
+'; then
     ERRORS=$((ERRORS + 1))
 else
-    echo "  ✓ All bracketed requirement tags conform to normative functional specifications."
+    echo "  ✓ 100% of requirement tags conform to the closed FR-* positive allowlist."
 fi
 
 # ---------------------------------------------------------
