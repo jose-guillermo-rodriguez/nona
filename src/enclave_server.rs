@@ -602,18 +602,14 @@ pub fn dispatch_frame_with_slot(
             let mut privkey = [0u8; 32];
             let mut pubkey = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
 
-            if payload.len() >= 32 {
-                privkey.copy_from_slice(&payload[..32]);
-                if derive_compressed_public_key(&privkey, &mut pubkey) != 0 {
-                    return (-1, 0);
-                }
-            } else {
-                let (k, q) = get_or_create_session_key();
-                privkey.copy_from_slice(&k);
-                pubkey.copy_from_slice(&q);
-            }
+            // ENCL-02: Cryptographically bind internal session key exclusively.
+            // Attestation must strictly bind the hardware-isolated session key.
+            let (k, q) = get_or_create_session_key();
+            privkey.copy_from_slice(&k);
+            pubkey.copy_from_slice(&q);
 
             let user_data_digest = sha512_digest(&pubkey);
+            ct_zeroize(&mut privkey);
 
             let status = unsafe { query_hardware_attestation(&user_data_digest, attestation_doc) };
 

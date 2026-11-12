@@ -384,3 +384,45 @@ fn test_enclave_cmd_attest_truncation_fail_closed() {
 
     assert_eq!(NONA_ERR_ATTEST_OVERFLOW, -112);
 }
+
+
+#[cfg(feature = "std")]
+#[test]
+fn test_encl02_unattested_channel_splice_rejection() {
+    use nona_core::client::{NonaClient, ClientError, DEFAULT_UNIX_SOCKET_PATH};
+    use nona_core::enclave_server::{run_unix_server, DEFAULT_UNIX_SOCKET};
+    use std::thread;
+    use std::time::Duration;
+
+    let _ = std::fs::remove_file(DEFAULT_UNIX_SOCKET_PATH);
+    thread::spawn(|| unsafe {
+        run_unix_server(DEFAULT_UNIX_SOCKET);
+    });
+    thread::sleep(Duration::from_millis(80));
+
+    let mut client = NonaClient::connect_unix(DEFAULT_UNIX_SOCKET_PATH)
+        .expect("Failed to connect to wire server");
+
+    // Client must refuse streaming or ingestion before attestation (anti-splice)
+    let payload = vec![0x11u8; 96];
+    let blind_err = client.blind_stream_chunked(&payload);
+    assert!(
+        matches!(blind_err, Err(ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail-closed on blind_stream_chunked"
+    );
+
+    let single_err = client.blind_phase1(&payload);
+    assert!(
+        matches!(single_err, Err(ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail-closed on blind_phase1"
+    );
+
+    let ingest_buf = [0x22u8; 128];
+    let ingest_err = client.ingest_chunk(&ingest_buf);
+    assert!(
+        matches!(ingest_err, Err(ClientError::AttestationValidationFailed(_))),
+        "Unattested channel must fail-closed on ingest_chunk"
+    );
+
+    let _ = std::fs::remove_file(DEFAULT_UNIX_SOCKET_PATH);
+}

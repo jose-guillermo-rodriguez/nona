@@ -221,6 +221,11 @@ impl NonaClient {
     }
 
     pub fn ingest_chunk(&mut self, chunk_128_bytes: &[u8]) -> Result<(), ClientError> {
+        if !self.attested {
+            return Err(ClientError::AttestationValidationFailed(
+                "Channel unauthenticated: attestation required before ingest",
+            ));
+        }
         if chunk_128_bytes.len() != 128 && chunk_128_bytes.len() != 4096 {
             return Err(ClientError::InvalidHeader);
         }
@@ -229,15 +234,20 @@ impl NonaClient {
     }
 
     pub fn blind_phase1(&mut self, raw_elements: &[u8]) -> Result<Vec<u8>, ClientError> {
-        let flags = if self.attested {
-            FLAG_USE_SESSION_KEY
-        } else {
-            0
-        };
-        self.send_command(CMD_BLIND_PHASE1, flags, raw_elements)
+        if !self.attested {
+            return Err(ClientError::AttestationValidationFailed(
+                "Channel unauthenticated: attestation required before blinding",
+            ));
+        }
+        self.send_command(CMD_BLIND_PHASE1, FLAG_USE_SESSION_KEY, raw_elements)
     }
 
     pub fn blind_stream_chunked(&mut self, stream_data: &[u8]) -> Result<Vec<u8>, ClientError> {
+        if !self.attested {
+            return Err(ClientError::AttestationValidationFailed(
+                "Channel unauthenticated: attestation required before blinding",
+            ));
+        }
         if stream_data.is_empty() || !stream_data.len().is_multiple_of(ELEMENT_BYTES) {
             return Err(ClientError::InvalidHeader);
         }
@@ -365,7 +375,14 @@ impl NonaClient {
             ));
         }
 
+        if resp.len() < 33 {
+            return Err(ClientError::InvalidHeader);
+        }
+
         self.session_pubkey.copy_from_slice(&resp[..33]);
+        if self.session_pubkey[0] != 0x02 && self.session_pubkey[0] != 0x03 {
+            return Err(ClientError::KeyBindingMismatch);
+        }
         let doc_bytes = &resp[33..];
 
         let expected_user_data = sha512_digest(&self.session_pubkey);
