@@ -2477,7 +2477,7 @@ verus! {
 use vstd::prelude::*;
 use vstd::arithmetic::div_mod::*;
 
-pub assume_specification [ i64::wrapping_neg ] (a: i64) -> (res: i64);
+/// Hardware compiler memory-ordering barrier boundary (no ghost state mutation).
 pub assume_specification [ core::sync::atomic::compiler_fence ] (o: core::sync::atomic::Ordering);
 
 /// Prime modulus p = 2^256 - 2^32 - 977 for the finite field Fp.

@@ -57,6 +57,8 @@ pub mod attestation;
 pub mod aws_root_ca;
 pub mod crypto;
 #[cfg(not(target_os = "none"))]
+pub mod enclave_boundaries;
+#[cfg(not(target_os = "none"))]
 pub mod enclave_server;
 pub mod exception;
 pub mod gatekeeper;

@@ -33,8 +33,11 @@ pub fn normalize_bytes_verus(w_norm: &[u8], buf: &mut [u8]) -> (result: i8)
     requires
         w_norm@.len() == 64,
         buf@.len() == 64,
+        forall|k: int| 0 <= k < 64 ==> #[trigger] old(buf)@[k] == 0x00u8,
     ensures
         result == 1 || result == -1,
+        forall|k: int| 0 <= k < 64 ==> (#[trigger] final(buf)@[k] == 0x00u8 || spec_is_valid_byte(final(buf)@[k])),
+        (result == 1) <==> (final(buf)@[0] != 0x00u8),
 {
     let mut write_idx: usize = 0;
     let mut i: usize = 0;
@@ -45,6 +48,8 @@ pub fn normalize_bytes_verus(w_norm: &[u8], buf: &mut [u8]) -> (result: i8)
             write_idx <= i,
             buf@.len() == 64,
             w_norm@.len() == 64,
+            forall|k: int| 0 <= k < write_idx ==> spec_is_valid_byte(#[trigger] buf@[k]),
+            forall|k: int| write_idx <= k < 64 ==> #[trigger] buf@[k] == 0x00u8,
         decreases 64 - i
     {
         let x = w_norm[i];
@@ -55,16 +60,40 @@ pub fn normalize_bytes_verus(w_norm: &[u8], buf: &mut [u8]) -> (result: i8)
         while j < 64
             invariant
                 j <= 64,
-                i <= 64,
+                i < 64,
                 write_idx <= i,
                 buf@.len() == 64,
                 w_norm@.len() == 64,
+                should_write == 1u8 <==> spec_is_valid_byte(x),
+                should_write == 0u8 || should_write == 1u8,
+                forall|k: int| 0 <= k < write_idx ==> spec_is_valid_byte(#[trigger] buf@[k]),
+                should_write == 1u8 && j > write_idx ==> spec_is_valid_byte(buf@[write_idx as int]),
+                should_write == 0u8 ==> (forall|k: int| write_idx <= k < 64 ==> #[trigger] buf@[k] == 0x00u8),
+                should_write == 1u8 ==> (forall|k: int| (write_idx + 1) <= k < 64 ==> #[trigger] buf@[k] == 0x00u8),
+                should_write == 1u8 && j <= write_idx ==> buf@[write_idx as int] == 0x00u8,
             decreases 64 - j
         {
             let is_target = (j == write_idx) as u8;
             let write_mask = 0u8.wrapping_sub(should_write & is_target);
             let current_val = buf[j];
-            buf[j] = (current_val & !write_mask) | (x & write_mask);
+            let next_val = (current_val & !write_mask) | (x & write_mask);
+            proof {
+                if should_write == 1u8 && j == write_idx {
+                    assert(is_target == 1u8);
+                    assert(0u8.wrapping_sub(1u8 & 1u8) == 0xFFu8) by(bit_vector);
+                    assert(write_mask == 0xFFu8);
+                    assert(((current_val & !0xFFu8) | (x & 0xFFu8)) == x) by(bit_vector);
+                    assert(next_val == x);
+                } else {
+                    assert((should_write & is_target) == 0u8) by(bit_vector)
+                        requires (should_write == 0u8 || should_write == 1u8) && (is_target == 0u8 || is_target == 1u8) && !(should_write == 1u8 && is_target == 1u8);
+                    assert(0u8.wrapping_sub(0u8) == 0u8) by(bit_vector);
+                    assert(write_mask == 0u8);
+                    assert(((current_val & !0u8) | (x & 0u8)) == current_val) by(bit_vector);
+                    assert(next_val == current_val);
+                }
+            }
+            buf[j] = next_val;
             j += 1;
         }
 

@@ -197,6 +197,7 @@ else
         "src/obfuscation.rs"
         "src/allocator.rs"
         "src/crypto.rs"
+        "src/enclave_boundaries.rs"
     )
 
     TOTAL_TARGETS=${#TARGETS[@]}
