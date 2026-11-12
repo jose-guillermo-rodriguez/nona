@@ -116,6 +116,8 @@ pub fn decontaminate() {
 /// Safe diverging fallback for panic handlers: zeroizes memory without firing CPU traps (ud2/brk).
 #[cold]
 pub fn zeroize_and_abort(_code: i32) -> ! {
+    #[cfg(not(target_os = "none"))]
+    crate::enclave_server::purge_session_key_unconditional();
     decontaminate();
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     #[cfg(feature = "host-defense")]

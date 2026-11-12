@@ -96,11 +96,27 @@ pub fn derive_compressed_public_key(
 /// Map with 1 key: {"Attestation": {"user_data": <pubkey>}}
 /// user_data binds the ephemeral public key directly into hypervisor PCR measurement.
 #[allow(clippy::cast_possible_truncation)]
-pub fn encode_nsm_attestation_request(user_data: &[u8], out_buf: &mut [u8]) -> Result<usize, i32> {
+pub fn encode_nsm_attestation_request_with_nonce(
+    user_data: &[u8],
+    nonce: Option<&[u8]>,
+    out_buf: &mut [u8],
+) -> Result<usize, i32> {
     // Canonical aws-nitro-enclaves-nsm-api CBOR envelope:
-    // {"Attestation": {"user_data": <bytes>, "nonce": null, "public_key": null}}
-    let req_len = 1 + 1 + 11 + 1 + 1 + 9 + 2 + user_data.len() + 1 + 5 + 1 + 1 + 10 + 1;
-    if out_buf.len() < req_len || user_data.len() > 255 {
+    // {"Attestation": {"user_data": <bytes>, "nonce": <bytes | null>, "public_key": null}}
+    if user_data.len() > 255 {
+        return Err(NONA_ERR_ATTEST_OVERFLOW);
+    }
+    let nonce_field_len = match nonce {
+        Some(n) => {
+            if n.len() > 255 {
+                return Err(NONA_ERR_ATTEST_OVERFLOW);
+            }
+            2 + n.len()
+        }
+        None => 1,
+    };
+    let req_len = 1 + 1 + 11 + 1 + 1 + 9 + 2 + user_data.len() + 1 + 5 + nonce_field_len + 1 + 10 + 1;
+    if out_buf.len() < req_len {
         return Err(NONA_ERR_ATTEST_OVERFLOW);
     }
 
@@ -127,13 +143,22 @@ pub fn encode_nsm_attestation_request(user_data: &[u8], out_buf: &mut [u8]) -> R
     out_buf[cursor..cursor + user_data.len()].copy_from_slice(user_data);
     cursor += user_data.len();
 
-    // Field 2: nonce = null
+    // Field 2: nonce = <bstr> or null
     out_buf[cursor] = 0x65; // text(5)
     cursor += 1;
     out_buf[cursor..cursor + 5].copy_from_slice(b"nonce");
     cursor += 5;
-    out_buf[cursor] = 0xf6; // null
-    cursor += 1;
+    if let Some(n) = nonce {
+        out_buf[cursor] = 0x58;
+        cursor += 1;
+        out_buf[cursor] = n.len() as u8;
+        cursor += 1;
+        out_buf[cursor..cursor + n.len()].copy_from_slice(n);
+        cursor += n.len();
+    } else {
+        out_buf[cursor] = 0xf6; // null
+        cursor += 1;
+    }
 
     // Field 3: public_key = null
     out_buf[cursor] = 0x6a; // text(10)
@@ -144,6 +169,10 @@ pub fn encode_nsm_attestation_request(user_data: &[u8], out_buf: &mut [u8]) -> R
     cursor += 1;
 
     Ok(cursor)
+}
+
+pub fn encode_nsm_attestation_request(user_data: &[u8], out_buf: &mut [u8]) -> Result<usize, i32> {
+    encode_nsm_attestation_request_with_nonce(user_data, None, out_buf)
 }
 
 // ============================================================================
@@ -327,8 +356,9 @@ pub fn nsm_get_random_u64() -> u64 {
 /// Direct zero-heap query to AWS Nitro Security Module (/dev/nsm) via ioctl.
 /// Binds the ephemeral public key to obtain a hypervisor-signed attestation document.
 #[allow(clippy::cast_possible_truncation)]
-pub unsafe fn query_hardware_attestation(
+pub unsafe fn query_hardware_attestation_with_nonce(
     user_data: &[u8],
+    nonce: Option<&[u8]>,
     doc_out: &mut AttestationDocumentBuffer,
 ) -> i32 {
     let dev_path = b"/dev/nsm\0";
@@ -338,7 +368,7 @@ pub unsafe fn query_hardware_attestation(
     }
 
     let mut req_raw = [0u8; 512];
-    let req_len = match encode_nsm_attestation_request(user_data, &mut req_raw) {
+    let req_len = match encode_nsm_attestation_request_with_nonce(user_data, nonce, &mut req_raw) {
         Ok(len) => len,
         Err(err) => {
             libc::close(fd);
@@ -372,6 +402,13 @@ pub unsafe fn query_hardware_attestation(
 
     doc_out.actual_len = resp_len;
     0
+}
+
+pub unsafe fn query_hardware_attestation(
+    user_data: &[u8],
+    doc_out: &mut AttestationDocumentBuffer,
+) -> i32 {
+    query_hardware_attestation_with_nonce(user_data, None, doc_out)
 }
 
 pub unsafe fn generate_enclave_attestation(

@@ -16,6 +16,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[cfg(all(not(feature = "std"), not(target_os = "none")))]
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    nona_core::enclave_server::harden_enclave_process();
     let port = nona_core::enclave_server::DEFAULT_VSOCK_PORT;
     let status = unsafe { nona_core::enclave_server::run_vsock_server(port) };
     if status != 0 {
@@ -26,6 +27,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 #[cfg(feature = "std")]
 fn main() {
+    nona_core::enclave_server::harden_enclave_process();
     let args: Vec<String> = std::env::args().collect();
     let mut unix_only = false;
     let mut custom_unix = None;

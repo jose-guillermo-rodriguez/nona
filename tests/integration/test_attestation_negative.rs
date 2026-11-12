@@ -326,4 +326,116 @@ mod negative_attestation_tests {
         drop(listener);
         let _ = std::fs::remove_file(sock_path);
     }
+
+    #[test]
+    fn test_gate_reject_forged_cose_signature_expired_timestamp_and_nonce_mismatch() {
+        use nona_core::client::synthesize_signed_cose_sign1_attestation;
+
+        let pcr0 = [0x11u8; 48];
+        let pcr1 = [0x22u8; 48];
+        let pcr2 = [0x33u8; 48];
+        let manifest_content = format!(
+            r#"{{
+  "schema_version": "2.0.0",
+  "measurements": {{
+    "PCR0": "{}",
+    "PCR1": "{}",
+    "PCR2": "{}"
+  }}
+}}"#,
+            hex::encode(&pcr0),
+            hex::encode(&pcr1),
+            hex::encode(&pcr2)
+        );
+        let manifest = ScopedTempFile::create("crypto_chain_gate", &manifest_content);
+
+        let pubkey = [0x02u8; 33];
+        let expected_digest = sha512_digest(&pubkey);
+        let nonce = [0x44u8; 32];
+        let now_secs: u64 = 1_780_000_000;
+        let now_ms: u64 = now_secs * 1000;
+
+        let (valid_doc, root_der) = synthesize_signed_cose_sign1_attestation(
+            &expected_digest,
+            Some(&nonce),
+            now_ms,
+            &pcr0,
+            &pcr1,
+            &pcr2,
+        );
+
+        // Baseline valid signed document succeeds
+        let baseline_res = NonaClient::parse_and_verify_cose_attestation_full(
+            &valid_doc,
+            &expected_digest,
+            Some(&nonce),
+            manifest.path_str(),
+            &root_der,
+            now_secs,
+        );
+        assert!(
+            baseline_res.is_ok(),
+            "Baseline signed COSE_Sign1 P-384 attestation must succeed: {baseline_res:?}"
+        );
+
+        // 1. Single-bit signature forgery in trailing 96-byte COSE signature must fail closed
+        let mut forged_sig_doc = valid_doc.clone();
+        let last_idx = forged_sig_doc.len() - 1;
+        forged_sig_doc[last_idx] ^= 0x01;
+        assert!(
+            NonaClient::parse_and_verify_cose_attestation_full(
+                &forged_sig_doc,
+                &expected_digest,
+                Some(&nonce),
+                manifest.path_str(),
+                &root_der,
+                now_secs,
+            )
+            .is_err(),
+            "Verifier must reject mutated ECDSA-P384 COSE signature"
+        );
+
+        // 2. Nonce mismatch must fail closed
+        let wrong_nonce = [0x99u8; 32];
+        assert!(
+            NonaClient::parse_and_verify_cose_attestation_full(
+                &valid_doc,
+                &expected_digest,
+                Some(&wrong_nonce),
+                manifest.path_str(),
+                &root_der,
+                now_secs,
+            )
+            .is_err(),
+            "Verifier must reject mismatched challenge nonce"
+        );
+
+        // 3. Expired attestation document (> 300s old) must fail closed
+        assert!(
+            NonaClient::parse_and_verify_cose_attestation_full(
+                &valid_doc,
+                &expected_digest,
+                Some(&nonce),
+                manifest.path_str(),
+                &root_der,
+                now_secs + 600,
+            )
+            .is_err(),
+            "Verifier must reject expired attestation document"
+        );
+
+        // 4. Future-dated attestation document (> 60s skew) must fail closed
+        assert!(
+            NonaClient::parse_and_verify_cose_attestation_full(
+                &valid_doc,
+                &expected_digest,
+                Some(&nonce),
+                manifest.path_str(),
+                &root_der,
+                now_secs - 120,
+            )
+            .is_err(),
+            "Verifier must reject future-dated attestation document"
+        );
+    }
 }

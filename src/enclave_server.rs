@@ -2,7 +2,7 @@
 //! Operates with zero dynamic allocations (#![no_std]) using cache-aligned stack buffers.
 
 use crate::attestation::{
-    derive_compressed_public_key, fill_nsm_entropy_or_abort, is_nsm_available, query_hardware_attestation,
+    derive_compressed_public_key, fill_nsm_entropy_or_abort, is_nsm_available, query_hardware_attestation_with_nonce,
     AttestationDocumentBuffer, ATTESTATION_MAX_DOC_SIZE, NONA_ERR_ATTEST_OVERFLOW,
     SECP256K1_PUBKEY_COMPRESSED_SIZE,
 };
@@ -25,6 +25,12 @@ pub const CMD_ATTEST: u16 = 0x0004;
 
 pub const FLAG_USE_SESSION_KEY: u32 = 0x0001;
 pub const MAX_PAYLOAD_SIZE: usize = 16384;
+
+/// Opaque wire status returned across vsock on any parsing, framing, or verification failure
+/// to suppress internal diagnostic oracles.
+pub const NONA_WIRE_ERR_OPAQUE: i32 = -1;
+/// Minimum per-frame wire response floor (250 microseconds) eliminating early-exit timing side channels.
+pub const WIRE_FRAME_FLOOR_NS: u64 = 250_000;
 
 const SESSION_STATE_UNINIT: u8 = 0;
 const SESSION_STATE_INITIALIZING: u8 = 1;
@@ -272,15 +278,75 @@ impl Drop for AlignedKeyBuffer {
 /// Satisfies enclave lifecycle reboot and testing reset semantics.
 /// Securely decontaminates the cached session keypair using constant-time zeroization.
 /// Gated to std/test environments to ensure physical exclusion from bare-metal #![no_std] production binaries.
-#[cfg(any(test, feature = "std"))]
-pub fn reset_session_key() {
+/// Unconditionally purges the enclave session keypair in constant time.
+/// Invoked during fatal aborts and crash signal traps to prevent memory remanence.
+pub fn purge_session_key_unconditional() {
     unsafe {
         ct_zeroize(&mut *SESSION_KEY.privkey.get());
         ct_zeroize(&mut *SESSION_KEY.pubkey.get());
     }
     SESSION_KEY
         .state
-        .store(SESSION_STATE_UNINIT, Ordering::Release);
+        .store(SESSION_STATE_UNINIT, Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn reset_session_key() {
+    purge_session_key_unconditional();
+}
+
+#[cfg(not(target_os = "none"))]
+extern "C" fn enclave_fatal_signal_handler(_sig: libc::c_int) {
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    purge_session_key_unconditional();
+    crate::exception::decontaminate();
+    unsafe {
+        libc::_exit(1);
+    }
+}
+
+/// Hardens the enclave process against host memory core dumps, ptrace inspection,
+/// swap leakage, and unhandled crash signal disclosure.
+pub fn harden_enclave_process() {
+    #[cfg(not(target_os = "none"))]
+    unsafe {
+        let zero_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let _ = libc::setrlimit(libc::RLIMIT_CORE, &raw const zero_limit);
+
+        #[cfg(target_os = "linux")]
+        {
+            const PR_SET_DUMPABLE: libc::c_int = 4;
+            const MADV_DONTDUMP: libc::c_int = 16;
+            let _ = libc::prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+            let _ = libc::madvise(
+                (&raw const SESSION_KEY).cast::<libc::c_void>().cast_mut(),
+                size_of::<EnclaveSessionKey>(),
+                MADV_DONTDUMP,
+            );
+            let _ = libc::madvise(
+                (&raw const STAGING_POOL).cast::<libc::c_void>().cast_mut(),
+                size_of::<StagingBufferPool>(),
+                MADV_DONTDUMP,
+            );
+        }
+
+        #[cfg(feature = "host-defense")]
+        {
+            let _ = libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        }
+
+        let handler = enclave_fatal_signal_handler as *const () as libc::sighandler_t;
+        let _ = libc::signal(libc::SIGINT, handler);
+        let _ = libc::signal(libc::SIGTERM, handler);
+        let _ = libc::signal(libc::SIGSEGV, handler);
+        let _ = libc::signal(libc::SIGABRT, handler);
+        let _ = libc::signal(libc::SIGBUS, handler);
+        let _ = libc::signal(libc::SIGILL, handler);
+        let _ = libc::signal(libc::SIGFPE, handler);
+    }
 }
 
 #[inline(never)]
@@ -447,6 +513,13 @@ pub fn dispatch_frame_with_slot(
             (status, out_len)
         }
         CMD_ATTEST => {
+            let client_nonce: Option<&[u8]> = if payload.is_empty() {
+                None
+            } else if payload.len() >= 16 && payload.len() <= 64 {
+                Some(payload)
+            } else {
+                return (-3, 0);
+            };
             if !is_nsm_available() {
                 return (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0);
             }
@@ -455,7 +528,9 @@ pub fn dispatch_frame_with_slot(
             let pubkey = get_or_create_session_pubkey();
             let user_data_digest = sha512_digest(&pubkey);
 
-            let status = unsafe { query_hardware_attestation(&user_data_digest, attestation_doc) };
+            let status = unsafe {
+                query_hardware_attestation_with_nonce(&user_data_digest, client_nonce, attestation_doc)
+            };
 
             let (status, out_len) = if status == 0 {
                 let total_needed = SECP256K1_PUBKEY_COMPRESSED_SIZE + attestation_doc.actual_len;
@@ -565,6 +640,41 @@ pub unsafe fn handle_enclave_client(client_fd: libc::c_int) {
 }
 
 #[inline(never)]
+unsafe fn monotonic_now_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) != 0 {
+        return 0;
+    }
+    let sec = u64::try_from(ts.tv_sec).unwrap_or(0);
+    let nsec = u64::try_from(ts.tv_nsec).unwrap_or(0);
+    sec.saturating_mul(1_000_000_000).saturating_add(nsec)
+}
+
+#[inline(never)]
+unsafe fn enforce_wire_frame_floor(start_ns: u64) {
+    if start_ns == 0 {
+        return;
+    }
+    let now_ns = monotonic_now_ns();
+    let elapsed = now_ns.saturating_sub(start_ns);
+    if elapsed < WIRE_FRAME_FLOOR_NS {
+        let rem = WIRE_FRAME_FLOOR_NS - elapsed;
+        let req = libc::timespec {
+            tv_sec: (rem / 1_000_000_000).cast_signed(),
+            tv_nsec: (rem % 1_000_000_000).cast_signed(),
+        };
+        let mut leftover = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let _ = libc::nanosleep(&raw const req, &raw mut leftover);
+    }
+}
+
+#[inline(never)]
 #[allow(clippy::cast_possible_truncation)]
 pub unsafe fn handle_enclave_client_with_staging(
     client_fd: libc::c_int,
@@ -581,18 +691,26 @@ pub unsafe fn handle_enclave_client_with_staging(
         {
             break;
         }
+        let frame_start_ns = monotonic_now_ns();
         let req_header = EnclaveRequestHeader::from_wire_bytes(&req_wire);
 
         let plen = req_header.payload_len as usize;
-        if plen > MAX_PAYLOAD_SIZE {
+        if req_header.magic != NONA_VSOCK_MAGIC
+            || req_header.version != NONA_VSOCK_VERSION
+            || plen > MAX_PAYLOAD_SIZE
+        {
+            slot.purge();
+            enforce_wire_frame_floor(frame_start_ns);
             break;
         }
 
         if plen > 0 && recv_exact(client_fd, slot.in_buffer.data.as_mut_ptr(), plen).is_err() {
+            slot.purge();
+            enforce_wire_frame_floor(frame_start_ns);
             break;
         }
 
-        let (status, resp_len) = dispatch_frame_with_slot(
+        let (raw_status, raw_resp_len) = dispatch_frame_with_slot(
             &req_header,
             &slot.in_buffer.data[..plen],
             &mut slot.out_buffer.data,
@@ -600,11 +718,23 @@ pub unsafe fn handle_enclave_client_with_staging(
             &mut slot.attestation_doc,
         );
 
+        let (wire_status, wire_resp_len) = if raw_status == 0 {
+            (0, raw_resp_len)
+        } else if raw_status == crate::attestation::NONA_ERR_NSM_UNAVAILABLE {
+            slot.purge();
+            (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0)
+        } else {
+            slot.purge();
+            (NONA_WIRE_ERR_OPAQUE, 0)
+        };
+
+        enforce_wire_frame_floor(frame_start_ns);
+
         let resp_header = EnclaveResponseHeader {
             magic: NONA_VSOCK_MAGIC,
             version: NONA_VSOCK_VERSION,
-            status,
-            payload_len: resp_len,
+            status: wire_status,
+            payload_len: wire_resp_len,
             reserved: [0u8; 20],
         };
 
@@ -618,13 +748,23 @@ pub unsafe fn handle_enclave_client_with_staging(
         {
             break;
         }
-        if resp_len > 0
-            && send_exact(client_fd, slot.out_buffer.data.as_ptr(), resp_len as usize).is_err()
+        if wire_resp_len > 0
+            && send_exact(
+                client_fd,
+                slot.out_buffer.data.as_ptr(),
+                wire_resp_len as usize,
+            )
+            .is_err()
         {
             break;
         }
 
         slot.purge();
+
+        // Fail-closed session termination: immediately close connection on any protocol/verification error
+        if wire_status != 0 && wire_status != crate::attestation::NONA_ERR_NSM_UNAVAILABLE {
+            break;
+        }
     }
 
     slot.purge();

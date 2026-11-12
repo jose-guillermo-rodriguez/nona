@@ -50,7 +50,7 @@ impl DerefMut for ChunkBuffer {
     }
 }
 
-use crate::crypto::sha512_digest;
+use crate::crypto::{ecdsa_p384_verify, sha512_digest};
 use crate::enclave_server::{
     EnclaveRequestHeader, EnclaveResponseHeader, CMD_ATTEST, CMD_BLIND_PHASE1, CMD_INGEST,
     CMD_PING, FLAG_USE_SESSION_KEY, NONA_VSOCK_MAGIC, NONA_VSOCK_VERSION,
@@ -155,6 +155,23 @@ pub struct NonaClient {
     pub session_pubkey: [u8; 33],
     pub attested: bool,
     pub allow_simulation_fallback: bool,
+}
+
+struct ExtractedPcrTriple<'a> {
+    pcr0: Option<&'a [u8]>,
+    pcr1: Option<&'a [u8]>,
+    pcr2: Option<&'a [u8]>,
+}
+
+struct ExtractedAttestationClaims<'a> {
+    user_data: Option<&'a [u8]>,
+    nonce: Option<&'a [u8]>,
+    timestamp_ms: Option<u64>,
+    pcr0: Option<&'a [u8]>,
+    pcr1: Option<&'a [u8]>,
+    pcr2: Option<&'a [u8]>,
+    leaf_cert: Option<&'a [u8]>,
+    cabundle: Option<Vec<&'a [u8]>>,
 }
 
 impl NonaClient {
@@ -357,13 +374,51 @@ impl NonaClient {
         Ok(())
     }
 
+    fn generate_client_challenge_nonce() -> [u8; 32] {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        static NONCE_SEQ: AtomicU64 = AtomicU64::new(1);
+        let mut seed = [0u8; 48];
+        let s1 = RandomState::new().build_hasher().finish();
+        let s2 = RandomState::new().build_hasher().finish();
+        let s3 = RandomState::new().build_hasher().finish();
+        let s4 = RandomState::new().build_hasher().finish();
+        let now_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));
+        let seq = NONCE_SEQ.fetch_add(1, Ordering::SeqCst);
+
+        seed[0..8].copy_from_slice(&s1.to_le_bytes());
+        seed[8..16].copy_from_slice(&s2.to_le_bytes());
+        seed[16..24].copy_from_slice(&s3.to_le_bytes());
+        seed[24..32].copy_from_slice(&s4.to_le_bytes());
+        seed[32..40].copy_from_slice(&now_nanos.to_le_bytes());
+        seed[40..48].copy_from_slice(&seq.to_le_bytes());
+
+        let digest = sha512_digest(&seed);
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&digest[..32]);
+        nonce
+    }
+
+    fn current_unix_timestamp_secs() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+
     pub fn attest_and_bind(&mut self, manifest_path: &str) -> Result<(), ClientError> {
         if manifest_path.trim().is_empty() {
             return Err(ClientError::PcrMismatch(
                 "Manifest path required for PCR policy pinning",
             ));
         }
-        let resp = match self.send_command(CMD_ATTEST, 0, &[]) {
+        let challenge_nonce = Self::generate_client_challenge_nonce();
+        let resp = match self.send_command(CMD_ATTEST, 0, &challenge_nonce) {
             Ok(r) => r,
             Err(ClientError::ServerStatusError(-110)) => {
                 if self.allow_simulation_fallback {
@@ -387,10 +442,6 @@ impl NonaClient {
             ));
         }
 
-        if resp.len() < 33 {
-            return Err(ClientError::InvalidHeader);
-        }
-
         self.session_pubkey.copy_from_slice(&resp[..33]);
         if self.session_pubkey[0] != 0x02 && self.session_pubkey[0] != 0x03 {
             return Err(ClientError::KeyBindingMismatch);
@@ -398,7 +449,12 @@ impl NonaClient {
         let doc_bytes = &resp[33..];
 
         let expected_user_data = sha512_digest(&self.session_pubkey);
-        Self::parse_and_verify_cose_attestation(doc_bytes, &expected_user_data, manifest_path)?;
+        Self::parse_and_verify_cose_attestation_with_nonce(
+            doc_bytes,
+            &expected_user_data,
+            Some(&challenge_nonce),
+            manifest_path,
+        )?;
 
         self.attested = true;
         Ok(())
@@ -434,10 +490,79 @@ impl NonaClient {
             }
             if let Some(doc_slice) = inner_doc_bytes {
                 let mut unpeeled_parser = CborParser::new(doc_slice);
-                return Ok(Some(unpeeled_parser.parse_value()?));
+                let val = unpeeled_parser.parse_value()?;
+                if !unpeeled_parser.is_eof() {
+                    return Err(ClientError::CborParseError);
+                }
+                return Ok(Some(val));
             }
         }
         Ok(None)
+    }
+
+    fn verify_cose_protected_headers(protected_bytes: &[u8]) -> Result<(), ClientError> {
+        if protected_bytes.is_empty() {
+            return Err(ClientError::AttestationValidationFailed(
+                "Empty COSE protected header",
+            ));
+        }
+        let mut hdr_parser = CborParser::new(protected_bytes);
+        let hdr_val = hdr_parser.parse_value()?;
+        if !hdr_parser.is_eof() {
+            return Err(ClientError::CborParseError);
+        }
+        let CborValue::Map(entries) = hdr_val else {
+            return Err(ClientError::CborParseError);
+        };
+
+        let mut seen_alg = false;
+        let mut seen_keys: Vec<&CborValue<'_>> = Vec::with_capacity(entries.len());
+        for (k, v) in &entries {
+            if seen_keys.contains(&k) {
+                return Err(ClientError::CborParseError);
+            }
+            seen_keys.push(k);
+
+            // RFC 8152 Table 1: header parameter 1 = alg, -35 (Negative(34)) = ES384
+            if let CborValue::Unsigned(1) = k {
+                match v {
+                    CborValue::Negative(34) => {
+                        seen_alg = true;
+                    }
+                    _ => {
+                        return Err(ClientError::AttestationValidationFailed(
+                            "Unsupported COSE signature algorithm (expected ES384)",
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !seen_alg {
+            return Err(ClientError::AttestationValidationFailed(
+                "Missing alg=ES384 in COSE protected header",
+            ));
+        }
+        Ok(())
+    }
+
+    fn build_cose_sig_structure(protected_bytes: &[u8], payload_bytes: &[u8]) -> Vec<u8> {
+        // RFC 8152 §4.4: Sig_structure = ["Signature1", body_protected, external_aad, payload]
+        let mut out = Vec::with_capacity(24 + protected_bytes.len() + payload_bytes.len());
+        // Array of 4 items (0x84)
+        out.push(0x84);
+        // Item 0: text(10) "Signature1"
+        out.push(0x6a);
+        out.extend_from_slice(b"Signature1");
+        // Item 1: body_protected bstr
+        encode_cbor_bstr_header(&mut out, protected_bytes.len());
+        out.extend_from_slice(protected_bytes);
+        // Item 2: external_aad empty bstr (0x40)
+        out.push(0x40);
+        // Item 3: payload bstr
+        encode_cbor_bstr_header(&mut out, payload_bytes.len());
+        out.extend_from_slice(payload_bytes);
+        out
     }
 
     pub fn parse_and_verify_cose_attestation(
@@ -445,114 +570,211 @@ impl NonaClient {
         expected_user_data: &[u8; 64],
         manifest_path: &str,
     ) -> Result<(), ClientError> {
-        if doc_bytes.len() < 32 {
-            return Err(ClientError::CborParseError);
+        Self::parse_and_verify_cose_attestation_with_nonce(
+            doc_bytes,
+            expected_user_data,
+            None,
+            manifest_path,
+        )
+    }
+
+    pub fn parse_and_verify_cose_attestation_with_nonce(
+        doc_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        expected_nonce: Option<&[u8]>,
+        manifest_path: &str,
+    ) -> Result<(), ClientError> {
+        Self::parse_and_verify_cose_attestation_full(
+            doc_bytes,
+            expected_user_data,
+            expected_nonce,
+            manifest_path,
+            &crate::aws_root_ca::AWS_NITRO_ROOT_CA_DER,
+            Self::current_unix_timestamp_secs(),
+        )
+    }
+
+    #[inline(never)]
+    fn verify_cose_chain_and_signature(
+        protected_bytes: &[u8],
+        payload_bytes: &[u8],
+        sig_bytes: &[u8],
+        leaf_cert_der: &[u8],
+        cabundle: &[&[u8]],
+        trusted_root_der: &[u8],
+        attest_secs: u64,
+    ) -> Result<(), ClientError> {
+        let leaf_pubkey = crate::aws_root_ca::verify_x509_chain(
+            leaf_cert_der,
+            cabundle,
+            trusted_root_der,
+            attest_secs,
+        )
+        .map_err(|_| {
+            ClientError::AttestationValidationFailed(
+                "X.509 certificate chain validation to trusted Root CA failed",
+            )
+        })?;
+
+        let sig_structure = Self::build_cose_sig_structure(protected_bytes, payload_bytes);
+        let mut sig_r = [0u8; 48];
+        let mut sig_s = [0u8; 48];
+        sig_r.copy_from_slice(&sig_bytes[..48]);
+        sig_s.copy_from_slice(&sig_bytes[48..96]);
+        if !ecdsa_p384_verify(&leaf_pubkey, &sig_structure, &sig_r, &sig_s) {
+            return Err(ClientError::AttestationValidationFailed(
+                "COSE_Sign1 ECDSA-P384 signature verification failed",
+            ));
         }
+        Ok(())
+    }
 
-        let mut parser = CborParser::new(doc_bytes);
-        let root = parser.parse_value()?;
-        let unpeeled_holder = Self::peel_outer_attestation_doc(&root)?;
-        let effective_root = unpeeled_holder.as_ref().unwrap_or(&root);
-
-        // COSE_Sign1: Tag(18, Array[4]) or untagged Array[4]
-        let cose_array = match effective_root {
-            CborValue::Tag(18, inner) => match inner.as_ref() {
-                CborValue::Array(arr) if arr.len() == 4 => arr,
-                _ => return Err(ClientError::CborParseError),
-            },
-            CborValue::Array(arr) if arr.len() == 4 => arr,
-            _ => return Err(ClientError::CborParseError),
+    #[inline(never)]
+    fn parse_pcr_map_entries<'a>(
+        pcr_map: &[(CborValue<'a>, CborValue<'a>)],
+    ) -> Result<ExtractedPcrTriple<'a>, ClientError> {
+        let mut pcrs = ExtractedPcrTriple {
+            pcr0: None,
+            pcr1: None,
+            pcr2: None,
         };
+        for (pk, pv) in pcr_map {
+            match pk {
+                CborValue::Unsigned(0) => {
+                    let CborValue::Bytes(pcr_bytes) = pv else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    if pcrs.pcr0.is_some() {
+                        return Err(ClientError::CborParseError);
+                    }
+                    pcrs.pcr0 = Some(*pcr_bytes);
+                }
+                CborValue::Unsigned(1) => {
+                    let CborValue::Bytes(pcr_bytes) = pv else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    if pcrs.pcr1.is_some() {
+                        return Err(ClientError::CborParseError);
+                    }
+                    pcrs.pcr1 = Some(*pcr_bytes);
+                }
+                CborValue::Unsigned(2) => {
+                    let CborValue::Bytes(pcr_bytes) = pv else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    if pcrs.pcr2.is_some() {
+                        return Err(ClientError::CborParseError);
+                    }
+                    pcrs.pcr2 = Some(*pcr_bytes);
+                }
+                _ => {}
+            }
+        }
+        Ok(pcrs)
+    }
 
-        // Extract COSE payload (Item 2)
-        let payload_bytes = match &cose_array[2] {
-            CborValue::Bytes(b) => *b,
-            _ => return Err(ClientError::CborParseError),
-        };
-
-        // Parse inner CBOR map of the attestation document
+    #[inline(never)]
+    fn extract_attestation_payload_claims<'a>(
+        payload_bytes: &'a [u8],
+    ) -> Result<ExtractedAttestationClaims<'a>, ClientError> {
         let mut payload_parser = CborParser::new(payload_bytes);
         let payload_val = payload_parser.parse_value()?;
+        if !payload_parser.is_eof() {
+            return Err(ClientError::CborParseError);
+        }
         let CborValue::Map(entries) = &payload_val else {
             return Err(ClientError::CborParseError);
         };
 
-        let mut extracted_user_data: Option<&[u8]> = None;
-        let mut extracted_pcr0: Option<&[u8]> = None;
-        let mut extracted_pcr1: Option<&[u8]> = None;
-        let mut extracted_pcr2: Option<&[u8]> = None;
-        let mut has_aws_root_ca = false;
+        let mut claims = ExtractedAttestationClaims {
+            user_data: None,
+            nonce: None,
+            timestamp_ms: None,
+            pcr0: None,
+            pcr1: None,
+            pcr2: None,
+            leaf_cert: None,
+            cabundle: None,
+        };
+
+        let mut seen_top_keys: Vec<&str> = Vec::with_capacity(entries.len());
 
         for (k, v) in entries {
-            if let CborValue::Text(key) = k {
-                match *key {
-                    "user_data" => {
-                        if let CborValue::Bytes(ud) = v {
-                            extracted_user_data = Some(*ud);
-                        }
+            let CborValue::Text(key) = k else {
+                return Err(ClientError::CborParseError);
+            };
+            if seen_top_keys.contains(key) {
+                return Err(ClientError::CborParseError);
+            }
+            seen_top_keys.push(key);
+
+            match *key {
+                "user_data" => {
+                    if let CborValue::Bytes(ud) = v {
+                        claims.user_data = Some(*ud);
                     }
-                    "pcrs" => {
-                        let CborValue::Map(pcr_map) = v else {
+                }
+                "nonce" => {
+                    if let CborValue::Bytes(n) = v {
+                        claims.nonce = Some(*n);
+                    }
+                }
+                "timestamp" => {
+                    let CborValue::Unsigned(ts_ms) = v else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    claims.timestamp_ms = Some(*ts_ms);
+                }
+                "pcrs" => {
+                    let CborValue::Map(pcr_map) = v else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    let pcrs = Self::parse_pcr_map_entries(pcr_map)?;
+                    claims.pcr0 = pcrs.pcr0;
+                    claims.pcr1 = pcrs.pcr1;
+                    claims.pcr2 = pcrs.pcr2;
+                }
+                "cabundle" => {
+                    let CborValue::Array(certs) = v else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    let mut chain = Vec::with_capacity(certs.len());
+                    for cert in certs {
+                        let CborValue::Bytes(cert_der) = cert else {
                             return Err(ClientError::CborParseError);
                         };
-                        for (pk, pv) in pcr_map {
-                            match pk {
-                                CborValue::Unsigned(0) => {
-                                    let CborValue::Bytes(pcr_bytes) = pv else {
-                                        return Err(ClientError::CborParseError);
-                                    };
-                                    if extracted_pcr0.is_some() {
-                                        return Err(ClientError::CborParseError);
-                                    }
-                                    extracted_pcr0 = Some(*pcr_bytes);
-                                }
-                                CborValue::Unsigned(1) => {
-                                    let CborValue::Bytes(pcr_bytes) = pv else {
-                                        return Err(ClientError::CborParseError);
-                                    };
-                                    if extracted_pcr1.is_some() {
-                                        return Err(ClientError::CborParseError);
-                                    }
-                                    extracted_pcr1 = Some(*pcr_bytes);
-                                }
-                                CborValue::Unsigned(2) => {
-                                    let CborValue::Bytes(pcr_bytes) = pv else {
-                                        return Err(ClientError::CborParseError);
-                                    };
-                                    if extracted_pcr2.is_some() {
-                                        return Err(ClientError::CborParseError);
-                                    }
-                                    extracted_pcr2 = Some(*pcr_bytes);
-                                }
-                                _ => {}
-                            }
-                        }
+                        chain.push(*cert_der);
                     }
-                    "cabundle" => {
-                        if let CborValue::Array(certs) = v {
-                            for cert in certs {
-                                if let CborValue::Bytes(cert_der) = cert {
-                                    if crate::aws_root_ca::matches_root_ca(cert_der) {
-                                        has_aws_root_ca = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "certificate" => {
-                        if let CborValue::Bytes(cert_der) = v {
-                            if crate::aws_root_ca::matches_root_ca(cert_der) {
-                                has_aws_root_ca = true;
-                            }
-                        }
-                    }
-                    _ => {}
+                    claims.cabundle = Some(chain);
                 }
+                "certificate" => {
+                    let CborValue::Bytes(cert_der) = v else {
+                        return Err(ClientError::CborParseError);
+                    };
+                    claims.leaf_cert = Some(*cert_der);
+                }
+                _ => {}
             }
         }
 
+        Ok(claims)
+    }
+
+    #[inline(never)]
+    fn verify_extracted_attestation_claims(
+        protected_bytes: &[u8],
+        payload_bytes: &[u8],
+        sig_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        expected_nonce: Option<&[u8]>,
+        manifest_path: &str,
+        trusted_root_der: &[u8],
+        current_unix_secs: u64,
+    ) -> Result<(), ClientError> {
+        let claims = Self::extract_attestation_payload_claims(payload_bytes)?;
+
         // 1. Verify User Data Key Binding in Constant Time
-        let ud = extracted_user_data.ok_or(ClientError::KeyBindingMismatch)?;
+        let ud = claims.user_data.ok_or(ClientError::KeyBindingMismatch)?;
         if ud.len() != 64 {
             return Err(ClientError::KeyBindingMismatch);
         }
@@ -564,28 +786,151 @@ impl NonaClient {
             return Err(ClientError::KeyBindingMismatch);
         }
 
-        // 2. Verify AWS Nitro Root CA Presence in Cert Chain
-        if !has_aws_root_ca {
+        // 2. Verify Cryptographic Challenge Nonce when Supplied
+        if let Some(exp_nonce) = expected_nonce {
+            let actual_nonce = claims.nonce.ok_or(ClientError::AttestationValidationFailed(
+                "Missing required cryptographic nonce in attestation document",
+            ))?;
+            if !crate::aws_root_ca::ct_bytes_eq(actual_nonce, exp_nonce) {
+                return Err(ClientError::AttestationValidationFailed(
+                    "Attestation challenge nonce mismatch",
+                ));
+            }
+        }
+
+        // 3. Enforce Attestation Timestamp Freshness & Clock-Skew Bounds
+        let ts_ms = claims
+            .timestamp_ms
+            .ok_or(ClientError::AttestationValidationFailed(
+                "Missing timestamp in attestation document",
+            ))?;
+        if ts_ms == 0 {
             return Err(ClientError::AttestationValidationFailed(
-                "Missing AWS Nitro Root CA",
+                "Zero timestamp in attestation document",
+            ));
+        }
+        let attest_secs = ts_ms / 1000;
+        if attest_secs > current_unix_secs.saturating_add(MAX_ATTESTATION_CLOCK_SKEW_SECS) {
+            return Err(ClientError::AttestationValidationFailed(
+                "Attestation document timestamp is future-dated",
+            ));
+        }
+        if current_unix_secs > attest_secs.saturating_add(MAX_ATTESTATION_AGE_SECS) {
+            return Err(ClientError::AttestationValidationFailed(
+                "Attestation document has expired",
             ));
         }
 
-        // 3. Verify Manifest PCR Measurements if Manifest Provided
+        // 4 & 5. Validate X.509 Certificate Chain up to Pinned Root CA & Verify COSE ES384 Signature
+        let leaf_cert_der = claims
+            .leaf_cert
+            .ok_or(ClientError::AttestationValidationFailed(
+                "Missing leaf certificate in attestation document",
+            ))?;
+        let cabundle = claims
+            .cabundle
+            .ok_or(ClientError::AttestationValidationFailed(
+                "Missing cabundle in attestation document",
+            ))?;
+        Self::verify_cose_chain_and_signature(
+            protected_bytes,
+            payload_bytes,
+            sig_bytes,
+            leaf_cert_der,
+            &cabundle,
+            trusted_root_der,
+            attest_secs,
+        )?;
+
+        // 6. Verify Manifest PCR Measurements if Manifest Provided
         if !manifest_path.is_empty() {
-            let p0 = extracted_pcr0.ok_or(ClientError::PcrMismatch(
+            let p0 = claims.pcr0.ok_or(ClientError::PcrMismatch(
                 "PCR0 missing from attestation document",
             ))?;
-            let p1 = extracted_pcr1.ok_or(ClientError::PcrMismatch(
+            let p1 = claims.pcr1.ok_or(ClientError::PcrMismatch(
                 "PCR1 missing from attestation document",
             ))?;
-            let p2 = extracted_pcr2.ok_or(ClientError::PcrMismatch(
+            let p2 = claims.pcr2.ok_or(ClientError::PcrMismatch(
                 "PCR2 missing from attestation document",
             ))?;
             Self::verify_manifest_pcrs(manifest_path, p0, p1, p2)?;
         }
 
         Ok(())
+    }
+
+    #[inline(never)]
+    pub fn parse_and_verify_cose_attestation_full(
+        doc_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        expected_nonce: Option<&[u8]>,
+        manifest_path: &str,
+        trusted_root_der: &[u8],
+        current_unix_secs: u64,
+    ) -> Result<(), ClientError> {
+        if doc_bytes.len() < 32 {
+            return Err(ClientError::CborParseError);
+        }
+
+        let mut parser = CborParser::new(doc_bytes);
+        let root = parser.parse_value()?;
+        if !parser.is_eof() {
+            return Err(ClientError::CborParseError);
+        }
+        let unpeeled_holder = Self::peel_outer_attestation_doc(&root)?;
+        let effective_root = unpeeled_holder.as_ref().unwrap_or(&root);
+
+        let cose_array = match effective_root {
+            CborValue::Tag(18, inner) => match inner.as_ref() {
+                CborValue::Array(arr) if arr.len() == 4 => arr,
+                _ => return Err(ClientError::CborParseError),
+            },
+            CborValue::Array(arr) if arr.len() == 4 => arr,
+            _ => return Err(ClientError::CborParseError),
+        };
+
+        let protected_bytes = match &cose_array[0] {
+            CborValue::Bytes(b) => *b,
+            _ => return Err(ClientError::CborParseError),
+        };
+        Self::verify_cose_protected_headers(protected_bytes)?;
+
+        let CborValue::Map(unprotected_entries) = &cose_array[1] else {
+            return Err(ClientError::CborParseError);
+        };
+        for (uk, _) in unprotected_entries {
+            if let CborValue::Unsigned(1) = uk {
+                return Err(ClientError::AttestationValidationFailed(
+                    "alg header forbidden in COSE unprotected bucket",
+                ));
+            }
+        }
+
+        let payload_bytes = match &cose_array[2] {
+            CborValue::Bytes(b) => *b,
+            _ => return Err(ClientError::CborParseError),
+        };
+
+        let sig_bytes = match &cose_array[3] {
+            CborValue::Bytes(b) => *b,
+            _ => return Err(ClientError::CborParseError),
+        };
+        if sig_bytes.len() != 96 {
+            return Err(ClientError::AttestationValidationFailed(
+                "Invalid COSE ES384 signature length (expected 96 bytes)",
+            ));
+        }
+
+        Self::verify_extracted_attestation_claims(
+            protected_bytes,
+            payload_bytes,
+            sig_bytes,
+            expected_user_data,
+            expected_nonce,
+            manifest_path,
+            trusted_root_der,
+            current_unix_secs,
+        )
     }
 
     fn send_command(
@@ -684,18 +1029,21 @@ pub enum CborValue<'a> {
 
 pub const MAX_CBOR_DEPTH: usize = 16;
 pub const MAX_CBOR_COLLECTION_ITEMS: usize = 1024;
+pub const MAX_ATTESTATION_AGE_SECS: u64 = 300;
+pub const MAX_ATTESTATION_CLOCK_SKEW_SECS: u64 = 60;
 
-/// Canonical AWS Nitro Enclaves Root Certificate (G1) SHA-384 Fingerprint
-/// Subject: C=US, O=Amazon, OU=AWS, CN=aws.nitro-enclaves
-/// Validity: 2019-10-28 to 2049-10-28
-pub const AWS_NITRO_ROOT_CA_SHA384: [u8; 48] = [
-    0x8c, 0x6e, 0x8a, 0x48, 0x22, 0xd0, 0x0c, 0x6e,
-    0x54, 0x44, 0x11, 0x65, 0x84, 0xd6, 0x48, 0xc1,
-    0x2c, 0x83, 0x8f, 0x1b, 0xae, 0x27, 0x24, 0x93,
-    0x78, 0xb8, 0x11, 0x61, 0xba, 0x23, 0x65, 0x76,
-    0xad, 0x14, 0x79, 0xc3, 0x48, 0xb1, 0xd4, 0xd7,
-    0x2c, 0x4a, 0x20, 0x23, 0x42, 0x5a, 0x58, 0x9c,
-];
+#[allow(clippy::cast_possible_truncation)]
+fn encode_cbor_bstr_header(out: &mut Vec<u8>, len: usize) {
+    if len <= 23 {
+        out.push(0x40 | (len as u8));
+    } else if len <= 255 {
+        out.push(0x58);
+        out.push(len as u8);
+    } else {
+        out.push(0x59);
+        out.extend_from_slice(&u16::try_from(len).unwrap_or(0).to_be_bytes());
+    }
+}
 
 pub struct CborParser<'a> {
     buf: &'a [u8],
@@ -706,6 +1054,10 @@ pub struct CborParser<'a> {
 impl<'a> CborParser<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, offset: 0, depth: 0 }
+    }
+
+    pub const fn is_eof(&self) -> bool {
+        self.offset == self.buf.len()
     }
 
     fn read_byte(&mut self) -> Result<u8, ClientError> {
@@ -946,6 +1298,246 @@ pub fn synthesize_mock_cose_sign1_document(
     cose
 }
 
+
+
+/// Synthesizes a genuine, cryptographically signed X.509 v3 P-384 certificate chain
+/// (Root CA + Leaf Certificate) and RFC 8152 COSE_Sign1 ES384 attestation document
+/// for end-to-end cryptographic verification testing.
+#[allow(clippy::cast_possible_truncation)]
+pub fn synthesize_signed_cose_sign1_attestation(
+    user_data: &[u8],
+    nonce: Option<&[u8]>,
+    timestamp_ms: u64,
+    pcr0: &[u8],
+    pcr1: &[u8],
+    pcr2: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    use crate::crypto::{ecdsa_p384_sign_deterministic, p384_public_key_from_private};
+
+    fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + content.len());
+        out.push(tag);
+        if content.len() < 128 {
+            out.push(content.len() as u8);
+        } else if content.len() <= 255 {
+            out.push(0x81);
+            out.push(content.len() as u8);
+        } else {
+            out.push(0x82);
+            out.extend_from_slice(&u16::try_from(content.len()).unwrap_or(0).to_be_bytes());
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    fn der_int_be(bytes: &[u8]) -> Vec<u8> {
+        let mut idx = 0;
+        while idx + 1 < bytes.len() && bytes[idx] == 0 {
+            idx += 1;
+        }
+        let slice = &bytes[idx..];
+        let mut buf = Vec::with_capacity(slice.len() + 1);
+        if (slice[0] & 0x80) != 0 {
+            buf.push(0x00);
+        }
+        buf.extend_from_slice(slice);
+        der_tlv(0x02, &buf)
+    }
+
+    fn build_x509_v3_cert(
+        serial: u8,
+        issuer_dn: &[u8],
+        subject_dn: &[u8],
+        not_before_utc: &[u8; 13],
+        not_after_utc: &[u8; 13],
+        subject_pubkey_uncompressed: &[u8; 97],
+        is_ca: bool,
+        signer_privkey: &[u8; 48],
+    ) -> Vec<u8> {
+        // Version [0] EXPLICIT INTEGER 2 (v3)
+        let ver = der_tlv(0xa0, &der_tlv(0x02, &[0x02]));
+        let ser = der_tlv(0x02, &[serial]);
+        // AlgId ecdsa-with-SHA384: SEQUENCE { OID 1.2.840.10045.4.3.3 }
+        let alg_id = der_tlv(0x30, &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03]);
+        // Validity
+        let mut val_body = Vec::new();
+        val_body.extend_from_slice(&der_tlv(0x17, not_before_utc));
+        val_body.extend_from_slice(&der_tlv(0x17, not_after_utc));
+        let validity = der_tlv(0x30, &val_body);
+
+        // SPKI: SEQUENCE { SEQUENCE { id-ecPublicKey, secp384r1 }, BIT STRING (0x00 || pubkey) }
+        let mut spki_alg = Vec::new();
+        spki_alg.extend_from_slice(&[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]);
+        spki_alg.extend_from_slice(&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]);
+        let mut spki_bs = Vec::with_capacity(98);
+        spki_bs.push(0x00);
+        spki_bs.extend_from_slice(subject_pubkey_uncompressed);
+        let mut spki_body = Vec::new();
+        spki_body.extend_from_slice(&der_tlv(0x30, &spki_alg));
+        spki_body.extend_from_slice(&der_tlv(0x03, &spki_bs));
+        let spki = der_tlv(0x30, &spki_body);
+
+        // Extensions [3] EXPLICIT SEQUENCE { BasicConstraints }
+        let bc_inner = if is_ca {
+            der_tlv(0x30, &[0x01, 0x01, 0xff])
+        } else {
+            der_tlv(0x30, &[])
+        };
+        let mut bc_ext_body = Vec::new();
+        bc_ext_body.extend_from_slice(&[0x06, 0x03, 0x55, 0x1d, 0x13]);
+        bc_ext_body.extend_from_slice(&[0x01, 0x01, 0xff]);
+        bc_ext_body.extend_from_slice(&der_tlv(0x04, &bc_inner));
+        let ext_seq = der_tlv(0x30, &der_tlv(0x30, &bc_ext_body));
+        let exts = der_tlv(0xa3, &ext_seq);
+
+        let mut tbs_body = Vec::new();
+        tbs_body.extend_from_slice(&ver);
+        tbs_body.extend_from_slice(&ser);
+        tbs_body.extend_from_slice(&alg_id);
+        tbs_body.extend_from_slice(issuer_dn);
+        tbs_body.extend_from_slice(&validity);
+        tbs_body.extend_from_slice(subject_dn);
+        tbs_body.extend_from_slice(&spki);
+        tbs_body.extend_from_slice(&exts);
+        let tbs = der_tlv(0x30, &tbs_body);
+
+        let raw_sig = ecdsa_p384_sign_deterministic(signer_privkey, &tbs)
+            .unwrap_or([0u8; 96]);
+        let mut der_sig_body = Vec::new();
+        der_sig_body.extend_from_slice(&der_int_be(&raw_sig[..48]));
+        der_sig_body.extend_from_slice(&der_int_be(&raw_sig[48..96]));
+        let der_sig_seq = der_tlv(0x30, &der_sig_body);
+        let mut sig_bs = Vec::with_capacity(1 + der_sig_seq.len());
+        sig_bs.push(0x00);
+        sig_bs.extend_from_slice(&der_sig_seq);
+
+        let mut cert_body = Vec::new();
+        cert_body.extend_from_slice(&tbs);
+        cert_body.extend_from_slice(&alg_id);
+        cert_body.extend_from_slice(&der_tlv(0x03, &sig_bs));
+        der_tlv(0x30, &cert_body)
+    }
+
+    let mut root_priv = [0u8; 48];
+    root_priv[47] = 0x11;
+    root_priv[0] = 0x07;
+    let root_pub = p384_public_key_from_private(&root_priv)
+        .map_or([0u8; 97], |p| p.to_uncompressed_bytes());
+
+    let mut leaf_priv = [0u8; 48];
+    leaf_priv[47] = 0x22;
+    leaf_priv[0] = 0x09;
+    let leaf_pub = p384_public_key_from_private(&leaf_priv)
+        .map_or([0u8; 97], |p| p.to_uncompressed_bytes());
+
+    // RDN SEQUENCE { SET { SEQUENCE { CN, UTF8String } } }
+    let root_cn = der_tlv(0x0c, b"nona-test-root-ca");
+    let mut root_atv = Vec::from([0x06, 0x03, 0x55, 0x04, 0x03]);
+    root_atv.extend_from_slice(&root_cn);
+    let root_dn = der_tlv(0x30, &der_tlv(0x31, &der_tlv(0x30, &root_atv)));
+
+    let leaf_cn = der_tlv(0x0c, b"nona-test-enclave-leaf");
+    let mut leaf_atv = Vec::from([0x06, 0x03, 0x55, 0x04, 0x03]);
+    leaf_atv.extend_from_slice(&leaf_cn);
+    let leaf_dn = der_tlv(0x30, &der_tlv(0x31, &der_tlv(0x30, &leaf_atv)));
+
+    let root_der = build_x509_v3_cert(
+        1,
+        &root_dn,
+        &root_dn,
+        b"200101000000Z",
+        b"491231235959Z",
+        &root_pub,
+        true,
+        &root_priv,
+    );
+    let leaf_der = build_x509_v3_cert(
+        2,
+        &root_dn,
+        &leaf_dn,
+        b"200101000000Z",
+        b"491231235959Z",
+        &leaf_pub,
+        false,
+        &root_priv,
+    );
+
+    let map_len: u8 = if nonce.is_some() { 0xa7 } else { 0xa6 };
+    let mut payload = Vec::new();
+    payload.push(map_len);
+
+    // 1. "module_id"
+    payload.push(0x69);
+    payload.extend_from_slice(b"module_id");
+    payload.push(0x6c);
+    payload.extend_from_slice(b"nona-enclave");
+
+    // 2. "timestamp" (uint64 ms)
+    payload.push(0x69);
+    payload.extend_from_slice(b"timestamp");
+    payload.push(0x1b);
+    payload.extend_from_slice(&timestamp_ms.to_be_bytes());
+
+    // 3. "user_data"
+    payload.push(0x69);
+    payload.extend_from_slice(b"user_data");
+    encode_cbor_bstr_header(&mut payload, user_data.len());
+    payload.extend_from_slice(user_data);
+
+    // 4. "pcrs"
+    payload.push(0x64);
+    payload.extend_from_slice(b"pcrs");
+    payload.push(0xa3);
+    payload.push(0x00);
+    encode_cbor_bstr_header(&mut payload, pcr0.len());
+    payload.extend_from_slice(pcr0);
+    payload.push(0x01);
+    encode_cbor_bstr_header(&mut payload, pcr1.len());
+    payload.extend_from_slice(pcr1);
+    payload.push(0x02);
+    encode_cbor_bstr_header(&mut payload, pcr2.len());
+    payload.extend_from_slice(pcr2);
+
+    // 5. "certificate" (leaf DER)
+    payload.push(0x6b);
+    payload.extend_from_slice(b"certificate");
+    encode_cbor_bstr_header(&mut payload, leaf_der.len());
+    payload.extend_from_slice(&leaf_der);
+
+    // 6. "cabundle" ([root_der])
+    payload.push(0x68);
+    payload.extend_from_slice(b"cabundle");
+    payload.push(0x81);
+    encode_cbor_bstr_header(&mut payload, root_der.len());
+    payload.extend_from_slice(&root_der);
+
+    // 7. optional "nonce"
+    if let Some(n) = nonce {
+        payload.push(0x65);
+        payload.extend_from_slice(b"nonce");
+        encode_cbor_bstr_header(&mut payload, n.len());
+        payload.extend_from_slice(n);
+    }
+
+    let protected = [0xa1, 0x01, 0x38, 0x22]; // {1: -35 (ES384)}
+    let sig_structure = NonaClient::build_cose_sig_structure(&protected, &payload);
+    let cose_sig = ecdsa_p384_sign_deterministic(&leaf_priv, &sig_structure)
+        .unwrap_or([0u8; 96]);
+
+    let mut cose = Vec::new();
+    cose.push(0xd2); // Tag(18)
+    cose.push(0x84); // Array(4)
+    cose.push(0x44);
+    cose.extend_from_slice(&protected);
+    cose.push(0xa0); // Unprotected empty map
+    encode_cbor_bstr_header(&mut cose, payload.len());
+    cose.extend_from_slice(&payload);
+    cose.push(0x58);
+    cose.push(96);
+    cose.extend_from_slice(&cose_sig);
+
+    (cose, root_der)
+}
 
 // ============================================================================
 // STRICT STRUCTURAL JSON MANIFEST PCR POLICY PARSER & CONSTANT-TIME PINNING

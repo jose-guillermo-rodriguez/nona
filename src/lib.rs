@@ -195,6 +195,9 @@ extern "C" fn handle_signal(sig: libc::c_int) {
 /// Substrate initialization disabling core dumps, locking RAM (mlockall), and binding signal traps.
 /// Host defense mechanics (page-locking and core-dump suppression) are gated behind feature = "host-defense".
 pub extern "C" fn nona_core_init() -> i32 {
+    #[cfg(not(target_os = "none"))]
+    enclave_server::harden_enclave_process();
+
     #[cfg(feature = "host-defense")]
     unsafe {
         let limit = libc::rlimit {

@@ -266,34 +266,56 @@ fn test_cose_cbor_attestation_and_pcr_verification() {
     let bad_pcr_verify = NonaClient::verify_manifest_pcrs(manifest_path, &bad_pcr0, &pcr1, &pcr2);
     assert!(bad_pcr_verify.is_err());
 
-    // 3. Test Canonical COSE/CBOR User Data Binding and AWS Root CA Validation
+    // 3. Test Canonical COSE/CBOR User Data Binding, Nonce, Timestamp, and X.509 P-384 Chain Validation
     let dummy_pubkey = [0x02u8; 33];
     let expected_digest = sha512_digest(&dummy_pubkey);
+    let test_nonce = [0x77u8; 32];
+    let now_secs: u64 = 1_780_000_000;
+    let now_ms: u64 = now_secs * 1000;
 
-    let valid_mock_doc = nona_core::client::synthesize_mock_cose_sign1_document(
+    let (valid_signed_doc, test_root_der) =
+        nona_core::client::synthesize_signed_cose_sign1_attestation(
+            &expected_digest,
+            Some(&test_nonce),
+            now_ms,
+            &pcr0,
+            &pcr1,
+            &pcr2,
+        );
+
+    let doc_res = NonaClient::parse_and_verify_cose_attestation_full(
+        &valid_signed_doc,
         &expected_digest,
-        &pcr0,
-        &pcr1,
-        &pcr2,
-        true,
+        Some(&test_nonce),
+        manifest_path,
+        &test_root_der,
+        now_secs,
+    );
+    assert!(
+        doc_res.is_ok(),
+        "Failed valid signed COSE_Sign1 ES384 attestation: {doc_res:?}"
     );
 
-    let doc_res = NonaClient::parse_and_verify_cose_attestation(
-        &valid_mock_doc,
+    // Pinned production AWS Nitro Root CA must reject synthetic test Root CA
+    let unpinned_root_res = NonaClient::parse_and_verify_cose_attestation(
+        &valid_signed_doc,
         &expected_digest,
         manifest_path,
     );
     assert!(
-        doc_res.is_ok(),
-        "Failed valid COSE attestation: {doc_res:?}"
+        unpinned_root_res.is_err(),
+        "Production AWS Nitro Root CA pin must reject non-AWS root chain"
     );
 
     // 4. Test Key Binding Mismatch Rejection
     let mismatched_digest = [0xEEu8; 64];
-    let mismatch_res = NonaClient::parse_and_verify_cose_attestation(
-        &valid_mock_doc,
+    let mismatch_res = NonaClient::parse_and_verify_cose_attestation_full(
+        &valid_signed_doc,
         &mismatched_digest,
+        Some(&test_nonce),
         manifest_path,
+        &test_root_der,
+        now_secs,
     );
     assert!(mismatch_res.is_err(), "Expected KeyBindingMismatch error");
 
@@ -309,19 +331,22 @@ fn test_cose_cbor_attestation_and_pcr_verification() {
     // Inner Key: "document" -> Text(8): 0x68
     wrapped_nsm_doc.push(0x68);
     wrapped_nsm_doc.extend_from_slice(b"document");
-    // Inner Value: Bytes(valid_mock_doc.len())
+    // Inner Value: Bytes(valid_signed_doc.len())
     wrapped_nsm_doc.push(0x59);
     wrapped_nsm_doc.extend_from_slice(
-        &u16::try_from(valid_mock_doc.len())
+        &u16::try_from(valid_signed_doc.len())
             .unwrap_or(0)
             .to_be_bytes(),
     );
-    wrapped_nsm_doc.extend_from_slice(&valid_mock_doc);
+    wrapped_nsm_doc.extend_from_slice(&valid_signed_doc);
 
-    let wrapped_doc_res = NonaClient::parse_and_verify_cose_attestation(
+    let wrapped_doc_res = NonaClient::parse_and_verify_cose_attestation_full(
         &wrapped_nsm_doc,
         &expected_digest,
+        Some(&test_nonce),
         manifest_path,
+        &test_root_der,
+        now_secs,
     );
     assert!(
         wrapped_doc_res.is_ok(),
@@ -394,4 +419,66 @@ fn test_enclave_cmd_attest_truncation_fail_closed() {
     use nona_core::attestation::NONA_ERR_ATTEST_OVERFLOW;
 
     assert_eq!(NONA_ERR_ATTEST_OVERFLOW, -112);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn test_enclave_wire_fail_closed_oracle_suppression() {
+    use nona_core::enclave_server::{
+        run_unix_server, EnclaveRequestHeader, EnclaveResponseHeader,
+        NONA_VSOCK_MAGIC, NONA_VSOCK_VERSION, NONA_WIRE_ERR_OPAQUE,
+    };
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
+
+    let sock_str = format!("/tmp/nona_oracle_gate_{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&sock_str);
+    let mut sock_cstr = sock_str.clone().into_bytes();
+    sock_cstr.push(0);
+
+    thread::spawn(move || unsafe {
+        run_unix_server(&sock_cstr);
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    let mut stream = UnixStream::connect(&sock_str).expect("connect to oracle probe socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set read timeout");
+
+    // Send malformed command (unknown opcode 0xDEAD)
+    let bad_cmd = EnclaveRequestHeader {
+        magic: NONA_VSOCK_MAGIC,
+        version: NONA_VSOCK_VERSION,
+        command: 0xDEAD,
+        payload_len: 0,
+        flags: 0,
+        reserved: [0u8; 16],
+    };
+    stream
+        .write_all(&bad_cmd.to_wire_bytes())
+        .expect("write bad command");
+    stream.flush().expect("flush");
+
+    let mut resp_wire = [0u8; EnclaveResponseHeader::WIRE_SIZE];
+    stream
+        .read_exact(&mut resp_wire)
+        .expect("read opaque error header");
+    let resp = EnclaveResponseHeader::from_wire_bytes(&resp_wire);
+    assert_eq!(
+        resp.status, NONA_WIRE_ERR_OPAQUE,
+        "Wire must suppress internal diagnostic codes into opaque -1"
+    );
+    assert_eq!(resp.payload_len, 0);
+
+    // Subsequent frame on the same socket MUST fail closed (server closed connection immediately)
+    let follow_up = stream.read_exact(&mut resp_wire);
+    assert!(
+        follow_up.is_err(),
+        "Server must immediately terminate connection on verification/protocol error"
+    );
+
+    let _ = std::fs::remove_file(&sock_str);
 }
