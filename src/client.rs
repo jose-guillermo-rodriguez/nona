@@ -7,7 +7,6 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use zeroize::Zeroize;
 
 #[repr(C, align(64))]
@@ -292,65 +291,41 @@ impl NonaClient {
         runtime_pcr1: &[u8],
         runtime_pcr2: &[u8],
     ) -> Result<(), ClientError> {
-        let mut file =
-            File::open(manifest_path).map_err(|_| ClientError::PcrMismatch("Manifest missing"))?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+        if runtime_pcr0.len() != 48 {
+            return Err(ClientError::PcrMismatch("Invalid runtime PCR0 byte length"));
+        }
+        if runtime_pcr1.len() != 48 {
+            return Err(ClientError::PcrMismatch("Invalid runtime PCR1 byte length"));
+        }
+        if runtime_pcr2.len() != 48 {
+            return Err(ClientError::PcrMismatch("Invalid runtime PCR2 byte length"));
+        }
 
-        let pcr0_hex = hex::encode(runtime_pcr0);
-        let pcr1_hex = hex::encode(runtime_pcr1);
-        let pcr2_hex = hex::encode(runtime_pcr2);
+        let policy = ManifestPcrPolicy::from_manifest_file(manifest_path)?;
 
-        if !contents.contains(&pcr0_hex) {
+        if !ct_eq_48(&policy.pcr0, runtime_pcr0) {
             return Err(ClientError::PcrMismatch("PCR0 integrity violation"));
         }
-        if !contents.contains(&pcr1_hex) {
+        if !ct_eq_48(&policy.pcr1, runtime_pcr1) {
             return Err(ClientError::PcrMismatch("PCR1 integrity violation"));
         }
-        if !contents.contains(&pcr2_hex) {
+        if !ct_eq_48(&policy.pcr2, runtime_pcr2) {
             return Err(ClientError::PcrMismatch("PCR2 integrity violation"));
-        }
-        if pcr0_hex == pcr1_hex {
-            return Err(ClientError::PcrMismatch(
-                "Degenerate PCR0 == PCR1 register collision",
-            ));
         }
         Ok(())
     }
 
     pub fn verify_simulation_manifest(manifest_path: &str) -> Result<(), ClientError> {
-        let mut file =
-            File::open(manifest_path).map_err(|_| ClientError::PcrMismatch("Manifest missing"))?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-
-        let find_pcr = |key: &str| -> Option<&str> {
-            let idx = contents.find(key)?;
-            let rest = &contents[idx + key.len()..];
-            let quote1 = rest.find('"')?;
-            let rest2 = &rest[quote1 + 1..];
-            let quote2 = rest2.find('"')?;
-            Some(&rest2[..quote2])
-        };
-
-        let p0 = find_pcr("\"PCR0\"").ok_or(ClientError::PcrMismatch("PCR0 missing"))?;
-        let p1 = find_pcr("\"PCR1\"").ok_or(ClientError::PcrMismatch("PCR1 missing"))?;
-        let p2 = find_pcr("\"PCR2\"").ok_or(ClientError::PcrMismatch("PCR2 missing"))?;
-
-        if p0.len() != 96 || p1.len() != 96 || p2.len() != 96 {
-            return Err(ClientError::PcrMismatch(
-                "Invalid SHA-384 PCR length in manifest",
-            ));
-        }
-        if p0 == p1 {
-            return Err(ClientError::PcrMismatch(
-                "Degenerate PCR0 == PCR1 register collision",
-            ));
-        }
+        let _policy = ManifestPcrPolicy::from_manifest_file(manifest_path)?;
         Ok(())
     }
 
     pub fn attest_and_bind(&mut self, manifest_path: &str) -> Result<(), ClientError> {
+        if manifest_path.trim().is_empty() {
+            return Err(ClientError::PcrMismatch(
+                "Manifest path required for PCR policy pinning",
+            ));
+        }
         let resp = match self.send_command(CMD_ATTEST, 0, &[]) {
             Ok(r) => r,
             Err(ClientError::ServerStatusError(-110)) => {
@@ -480,16 +455,39 @@ impl NonaClient {
                         }
                     }
                     "pcrs" => {
-                        if let CborValue::Map(pcr_map) = v {
-                            for (pk, pv) in pcr_map {
-                                if let CborValue::Bytes(pcr_bytes) = pv {
-                                    match pk {
-                                        CborValue::Unsigned(0) => extracted_pcr0 = Some(*pcr_bytes),
-                                        CborValue::Unsigned(1) => extracted_pcr1 = Some(*pcr_bytes),
-                                        CborValue::Unsigned(2) => extracted_pcr2 = Some(*pcr_bytes),
-                                        _ => {}
+                        let CborValue::Map(pcr_map) = v else {
+                            return Err(ClientError::CborParseError);
+                        };
+                        for (pk, pv) in pcr_map {
+                            match pk {
+                                CborValue::Unsigned(0) => {
+                                    let CborValue::Bytes(pcr_bytes) = pv else {
+                                        return Err(ClientError::CborParseError);
+                                    };
+                                    if extracted_pcr0.is_some() {
+                                        return Err(ClientError::CborParseError);
                                     }
+                                    extracted_pcr0 = Some(*pcr_bytes);
                                 }
+                                CborValue::Unsigned(1) => {
+                                    let CborValue::Bytes(pcr_bytes) = pv else {
+                                        return Err(ClientError::CborParseError);
+                                    };
+                                    if extracted_pcr1.is_some() {
+                                        return Err(ClientError::CborParseError);
+                                    }
+                                    extracted_pcr1 = Some(*pcr_bytes);
+                                }
+                                CborValue::Unsigned(2) => {
+                                    let CborValue::Bytes(pcr_bytes) = pv else {
+                                        return Err(ClientError::CborParseError);
+                                    };
+                                    if extracted_pcr2.is_some() {
+                                        return Err(ClientError::CborParseError);
+                                    }
+                                    extracted_pcr2 = Some(*pcr_bytes);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -537,7 +535,7 @@ impl NonaClient {
         }
 
         // 3. Verify Manifest PCR Measurements if Manifest Provided
-        if !manifest_path.is_empty() && Path::new(manifest_path).exists() {
+        if !manifest_path.is_empty() {
             let p0 = extracted_pcr0.ok_or(ClientError::PcrMismatch(
                 "PCR0 missing from attestation document",
             ))?;
@@ -909,4 +907,400 @@ pub fn synthesize_mock_cose_sign1_document(
     cose.extend_from_slice(&dummy_sig);
 
     cose
+}
+
+
+// ============================================================================
+// STRICT STRUCTURAL JSON MANIFEST PCR POLICY PARSER & CONSTANT-TIME PINNING
+// ============================================================================
+
+const MAX_JSON_DEPTH: usize = 16;
+const MAX_JSON_ITEMS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsonValue {
+    Null,
+    Bool(bool),
+    Number,
+    String(String),
+    Array(Vec<JsonValue>),
+    Object(Vec<(String, JsonValue)>),
+}
+
+struct StrictJsonParser<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    depth: usize,
+}
+
+impl<'a> StrictJsonParser<'a> {
+    fn new(src: &'a str) -> Self {
+        Self {
+            bytes: src.as_bytes(),
+            offset: 0,
+            depth: 0,
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.offset < self.bytes.len() {
+            match self.bytes[self.offset] {
+                b' ' | b'\t' | b'\n' | b'\r' => self.offset += 1,
+                _ => break,
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.offset).copied()
+    }
+
+    fn next_byte(&mut self) -> Result<u8, ClientError> {
+        let b = self
+            .bytes
+            .get(self.offset)
+            .copied()
+            .ok_or(ClientError::PcrMismatch("Unexpected EOF in JSON manifest"))?;
+        self.offset += 1;
+        Ok(b)
+    }
+
+    fn parse_root(mut self) -> Result<JsonValue, ClientError> {
+        self.skip_whitespace();
+        let val = self.parse_value()?;
+        self.skip_whitespace();
+        if self.offset != self.bytes.len() {
+            return Err(ClientError::PcrMismatch(
+                "Trailing data after JSON manifest root",
+            ));
+        }
+        Ok(val)
+    }
+
+    fn parse_value(&mut self) -> Result<JsonValue, ClientError> {
+        if self.depth >= MAX_JSON_DEPTH {
+            return Err(ClientError::PcrMismatch("JSON manifest nesting overflow"));
+        }
+        self.skip_whitespace();
+        let b = self
+            .peek()
+            .ok_or(ClientError::PcrMismatch("Empty JSON value in manifest"))?;
+        self.depth += 1;
+        let res = match b {
+            b'{' => self.parse_object(),
+            b'[' => self.parse_array(),
+            b'"' => self.parse_string().map(JsonValue::String),
+            b't' => self.parse_literal(b"true", JsonValue::Bool(true)),
+            b'f' => self.parse_literal(b"false", JsonValue::Bool(false)),
+            b'n' => self.parse_literal(b"null", JsonValue::Null),
+            b'-' | b'0'..=b'9' => self.parse_number(),
+            _ => Err(ClientError::PcrMismatch("Malformed JSON token in manifest")),
+        };
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_literal(&mut self, lit: &[u8], val: JsonValue) -> Result<JsonValue, ClientError> {
+        let end = self
+            .offset
+            .checked_add(lit.len())
+            .ok_or(ClientError::PcrMismatch("Malformed JSON literal"))?;
+        if self.bytes.get(self.offset..end) != Some(lit) {
+            return Err(ClientError::PcrMismatch("Invalid JSON literal in manifest"));
+        }
+        self.offset = end;
+        Ok(val)
+    }
+
+    fn parse_number(&mut self) -> Result<JsonValue, ClientError> {
+        if self.peek() == Some(b'-') {
+            self.offset += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.offset += 1,
+            Some(b'1'..=b'9') => {
+                self.offset += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.offset += 1;
+                }
+            }
+            _ => return Err(ClientError::PcrMismatch("Invalid JSON number in manifest")),
+        }
+        if self.peek() == Some(b'.') {
+            self.offset += 1;
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(ClientError::PcrMismatch("Invalid JSON fraction in manifest"));
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.offset += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.offset += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.offset += 1;
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(ClientError::PcrMismatch("Invalid JSON exponent in manifest"));
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.offset += 1;
+            }
+        }
+        Ok(JsonValue::Number)
+    }
+
+    fn parse_hex_u16(&mut self) -> Result<u16, ClientError> {
+        let mut acc = 0u16;
+        for _ in 0..4 {
+            let b = self.next_byte()?;
+            let digit = match b {
+                b'0'..=b'9' => u16::from(b - b'0'),
+                b'a'..=b'f' => u16::from(b - b'a' + 10),
+                b'A'..=b'F' => u16::from(b - b'A' + 10),
+                _ => {
+                    return Err(ClientError::PcrMismatch(
+                        "Invalid unicode escape in manifest",
+                    ))
+                }
+            };
+            acc = (acc << 4) | digit;
+        }
+        Ok(acc)
+    }
+
+    fn parse_string(&mut self) -> Result<String, ClientError> {
+        if self.next_byte()? != b'"' {
+            return Err(ClientError::PcrMismatch("Expected JSON string quote"));
+        }
+        let mut out = String::new();
+        loop {
+            let b = self.next_byte()?;
+            match b {
+                b'"' => return Ok(out),
+                b'\\' => {
+                    let esc = self.next_byte()?;
+                    match esc {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{0008}'),
+                        b'f' => out.push('\u{000C}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let code = self.parse_hex_u16()?;
+                            let ch = char::from_u32(u32::from(code)).ok_or(
+                                ClientError::PcrMismatch("Invalid unicode scalar in manifest"),
+                            )?;
+                            out.push(ch);
+                        }
+                        _ => {
+                            return Err(ClientError::PcrMismatch(
+                                "Invalid JSON escape sequence in manifest",
+                            ))
+                        }
+                    }
+                }
+                0x00..=0x1F => {
+                    return Err(ClientError::PcrMismatch(
+                        "Unescaped control character in JSON manifest",
+                    ))
+                }
+                _ => {
+                    let start = self.offset - 1;
+                    let remaining = core::str::from_utf8(&self.bytes[start..]).map_err(|_| {
+                        ClientError::PcrMismatch("Invalid UTF-8 sequence in JSON manifest")
+                    })?;
+                    let ch = remaining
+                        .chars()
+                        .next()
+                        .ok_or(ClientError::PcrMismatch("Empty UTF-8 char in manifest"))?;
+                    out.push(ch);
+                    self.offset = start + ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    fn parse_array(&mut self) -> Result<JsonValue, ClientError> {
+        if self.next_byte()? != b'[' {
+            return Err(ClientError::PcrMismatch("Expected JSON array opening"));
+        }
+        self.skip_whitespace();
+        let mut items = Vec::new();
+        if self.peek() == Some(b']') {
+            self.offset += 1;
+            return Ok(JsonValue::Array(items));
+        }
+        loop {
+            if items.len() >= MAX_JSON_ITEMS {
+                return Err(ClientError::PcrMismatch("JSON array exceeds item ceiling"));
+            }
+            items.push(self.parse_value()?);
+            self.skip_whitespace();
+            match self.next_byte()? {
+                b',' => {}
+                b']' => return Ok(JsonValue::Array(items)),
+                _ => {
+                    return Err(ClientError::PcrMismatch(
+                        "Expected ',' or ']' in JSON array",
+                    ))
+                }
+            }
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<JsonValue, ClientError> {
+        if self.next_byte()? != b'{' {
+            return Err(ClientError::PcrMismatch("Expected JSON object opening"));
+        }
+        self.skip_whitespace();
+        let mut entries: Vec<(String, JsonValue)> = Vec::new();
+        if self.peek() == Some(b'}') {
+            self.offset += 1;
+            return Ok(JsonValue::Object(entries));
+        }
+        loop {
+            if entries.len() >= MAX_JSON_ITEMS {
+                return Err(ClientError::PcrMismatch("JSON object exceeds key ceiling"));
+            }
+            self.skip_whitespace();
+            let key = self.parse_string()?;
+            if entries.iter().any(|(existing, _)| existing == &key) {
+                return Err(ClientError::PcrMismatch("Duplicate JSON key in manifest"));
+            }
+            self.skip_whitespace();
+            if self.next_byte()? != b':' {
+                return Err(ClientError::PcrMismatch("Expected ':' after JSON key"));
+            }
+            let val = self.parse_value()?;
+            entries.push((key, val));
+            self.skip_whitespace();
+            match self.next_byte()? {
+                b',' => {}
+                b'}' => return Ok(JsonValue::Object(entries)),
+                _ => {
+                    return Err(ClientError::PcrMismatch(
+                        "Expected ',' or '}' in JSON object",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+struct ManifestPcrPolicy {
+    pcr0: [u8; 48],
+    pcr1: [u8; 48],
+    pcr2: [u8; 48],
+}
+
+impl ManifestPcrPolicy {
+    fn from_manifest_file(manifest_path: &str) -> Result<Self, ClientError> {
+        let mut file =
+            File::open(manifest_path).map_err(|_| ClientError::PcrMismatch("Manifest missing"))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        Self::parse_json(&contents)
+    }
+
+    fn parse_json(contents: &str) -> Result<Self, ClientError> {
+        let root = StrictJsonParser::new(contents).parse_root()?;
+        let JsonValue::Object(root_entries) = &root else {
+            return Err(ClientError::PcrMismatch("Manifest root must be JSON object"));
+        };
+
+        let measurements_val = root_entries
+            .iter()
+            .find(|(k, _)| k == "measurements")
+            .map(|(_, v)| v)
+            .ok_or(ClientError::PcrMismatch(
+                "Missing 'measurements' object in manifest",
+            ))?;
+
+        let JsonValue::Object(meas_entries) = measurements_val else {
+            return Err(ClientError::PcrMismatch(
+                "'measurements' must be a JSON object",
+            ));
+        };
+
+        if let Some((_, algo_val)) = meas_entries.iter().find(|(k, _)| k == "hash_algorithm") {
+            let JsonValue::String(algo) = algo_val else {
+                return Err(ClientError::PcrMismatch(
+                    "Invalid 'hash_algorithm' type in manifest",
+                ));
+            };
+            if algo != "SHA-384" {
+                return Err(ClientError::PcrMismatch(
+                    "Unsupported PCR hash_algorithm (expected SHA-384)",
+                ));
+            }
+        }
+
+        let pcr0_str = extract_required_string(meas_entries, "PCR0", "PCR0 missing from measurements")?;
+        let pcr1_str = extract_required_string(meas_entries, "PCR1", "PCR1 missing from measurements")?;
+        let pcr2_str = extract_required_string(meas_entries, "PCR2", "PCR2 missing from measurements")?;
+
+        let pcr0 = parse_strict_pcr_sha384(pcr0_str, "Invalid PCR0 policy digest format")?;
+        let pcr1 = parse_strict_pcr_sha384(pcr1_str, "Invalid PCR1 policy digest format")?;
+        let pcr2 = parse_strict_pcr_sha384(pcr2_str, "Invalid PCR2 policy digest format")?;
+
+        if ct_eq_48(&pcr0, &pcr1) || ct_eq_48(&pcr0, &pcr2) || ct_eq_48(&pcr1, &pcr2) {
+            return Err(ClientError::PcrMismatch(
+                "Degenerate PCR register collision across PCR0/PCR1/PCR2",
+            ));
+        }
+
+        Ok(Self { pcr0, pcr1, pcr2 })
+    }
+}
+
+fn extract_required_string<'a>(
+    entries: &'a [(String, JsonValue)],
+    key: &str,
+    missing_err: &'static str,
+) -> Result<&'a str, ClientError> {
+    let val = entries
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+        .ok_or(ClientError::PcrMismatch(missing_err))?;
+    match val {
+        JsonValue::String(s) => Ok(s.as_str()),
+        _ => Err(ClientError::PcrMismatch(
+            "PCR policy value must be a JSON string",
+        )),
+    }
+}
+
+fn parse_strict_pcr_sha384(raw: &str, err_msg: &'static str) -> Result<[u8; 48], ClientError> {
+    // Enforce exact 384-bit (96 hex chars) representation: reject wildcards (*, ?),
+    // regex patterns, truncated prefixes, 0x prefixes, and whitespace padding.
+    if raw.len() != 96 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ClientError::PcrMismatch(err_msg));
+    }
+    let decoded = hex::decode(raw).ok_or(ClientError::PcrMismatch(err_msg))?;
+    let arr: [u8; 48] = decoded
+        .try_into()
+        .map_err(|_| ClientError::PcrMismatch(err_msg))?;
+    if arr == [0u8; 48] {
+        return Err(ClientError::PcrMismatch(
+            "All-zero PCR register policy rejected",
+        ));
+    }
+    Ok(arr)
+}
+
+#[inline(never)]
+fn ct_eq_48(expected: &[u8; 48], actual: &[u8]) -> bool {
+    if actual.len() != 48 {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected.iter().zip(actual.iter()) {
+        diff |= a ^ b;
+    }
+    core::hint::black_box(diff) == 0
 }
