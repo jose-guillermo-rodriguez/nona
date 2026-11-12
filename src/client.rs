@@ -155,6 +155,8 @@ pub struct NonaClient {
     pub session_pubkey: [u8; 33],
     pub attested: bool,
     pub allow_simulation_fallback: bool,
+    pub last_verified_attest_secs: u64,
+    pub challenge_rtt_ns: u64,
 }
 
 struct ExtractedPcrTriple<'a> {
@@ -182,6 +184,8 @@ impl NonaClient {
             session_pubkey: [0u8; 33],
             attested: false,
             allow_simulation_fallback: false,
+            last_verified_attest_secs: 0,
+            challenge_rtt_ns: 0,
         })
     }
 
@@ -223,6 +227,8 @@ impl NonaClient {
                 session_pubkey: [0u8; 33],
                 attested: false,
                 allow_simulation_fallback: false,
+                last_verified_attest_secs: 0,
+                challenge_rtt_ns: 0,
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -374,50 +380,172 @@ impl NonaClient {
         Ok(())
     }
 
-    fn generate_client_challenge_nonce() -> [u8; 32] {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
+    /// Generates a 256-bit cryptographic challenge nonce bound to OS CSPRNG entropy,
+    /// a strictly monotonic atomic sequence counter, and monotonic `Instant` ticks.
+    /// Completely isolated from untrusted host/hypervisor wall-clock (`SystemTime`) (FR-36-TIMEWARP).
+    pub fn generate_client_challenge_nonce() -> Result<[u8; 32], ClientError> {
         use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::sync::OnceLock;
+        use std::time::Instant;
 
         static NONCE_SEQ: AtomicU64 = AtomicU64::new(1);
-        let mut seed = [0u8; 48];
-        let s1 = RandomState::new().build_hasher().finish();
-        let s2 = RandomState::new().build_hasher().finish();
-        let s3 = RandomState::new().build_hasher().finish();
-        let s4 = RandomState::new().build_hasher().finish();
-        let now_nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));
+        static NONCE_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+        let mut os_rand = [0u8; 32];
+        let dev_path = b"/dev/urandom\0";
+        let fd = unsafe { libc::open(dev_path.as_ptr().cast::<libc::c_char>(), libc::O_RDONLY) };
+        if fd < 0 {
+            return Err(ClientError::AttestationValidationFailed(
+                "OS CSPRNG unavailable for challenge nonce",
+            ));
+        }
+        let mut total_read = 0usize;
+        while total_read < os_rand.len() {
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    os_rand[total_read..].as_mut_ptr().cast(),
+                    os_rand.len() - total_read,
+                )
+            };
+            if n <= 0 {
+                unsafe {
+                    libc::close(fd);
+                }
+                os_rand.zeroize();
+                return Err(ClientError::AttestationValidationFailed(
+                    "Short read from OS CSPRNG for challenge nonce",
+                ));
+            }
+            let Ok(chunk) = usize::try_from(n) else {
+                unsafe {
+                    libc::close(fd);
+                }
+                os_rand.zeroize();
+                return Err(ClientError::AttestationValidationFailed(
+                    "Invalid OS CSPRNG read count",
+                ));
+            };
+            total_read += chunk;
+        }
+        unsafe {
+            libc::close(fd);
+        }
+
+        let mut acc = 0u8;
+        for &b in &os_rand {
+            acc |= b;
+        }
+        if acc == 0 {
+            return Err(ClientError::AttestationValidationFailed(
+                "Degenerate all-zero OS CSPRNG output",
+            ));
+        }
+
+        let origin = NONCE_EPOCH.get_or_init(Instant::now);
+        let mono_nanos = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let seq = NONCE_SEQ.fetch_add(1, Ordering::SeqCst);
 
-        seed[0..8].copy_from_slice(&s1.to_le_bytes());
-        seed[8..16].copy_from_slice(&s2.to_le_bytes());
-        seed[16..24].copy_from_slice(&s3.to_le_bytes());
-        seed[24..32].copy_from_slice(&s4.to_le_bytes());
-        seed[32..40].copy_from_slice(&now_nanos.to_le_bytes());
+        let mut seed = [0u8; 48];
+        seed[0..32].copy_from_slice(&os_rand);
+        seed[32..40].copy_from_slice(&mono_nanos.to_le_bytes());
         seed[40..48].copy_from_slice(&seq.to_le_bytes());
+        os_rand.zeroize();
 
         let digest = sha512_digest(&seed);
+        seed.zeroize();
         let mut nonce = [0u8; 32];
         nonce.copy_from_slice(&digest[..32]);
-        nonce
+        Ok(nonce)
     }
 
-    fn current_unix_timestamp_secs() -> u64 {
+    /// Advances a monotonic reference clock anchored at initial observation plus `Instant::elapsed()`.
+    /// Prevents backward hypervisor/host wall-clock warps from regressing reference timestamps
+    /// to resurrect expired attestation documents or certificates (FR-36-TIMEWARP).
+    pub fn advance_monotonic_reference_secs(observed_wall_secs: u64) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::OnceLock;
+        use std::time::Instant;
+
+        static MONO_ANCHOR: OnceLock<(u64, Instant)> = OnceLock::new();
+        static REF_HWM_SECS: AtomicU64 = AtomicU64::new(0);
+
+        let (anchor_secs, anchor_inst) =
+            *MONO_ANCHOR.get_or_init(|| (observed_wall_secs, Instant::now()));
+        let mono_floor = anchor_secs.saturating_add(anchor_inst.elapsed().as_secs());
+        let candidate = observed_wall_secs.max(mono_floor);
+
+        let mut prev = REF_HWM_SECS.load(Ordering::SeqCst);
+        loop {
+            let next = prev.max(candidate);
+            match REF_HWM_SECS.compare_exchange_weak(
+                prev,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => prev = actual,
+            }
+        }
+    }
+
+    fn current_monotonic_reference_secs() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
+        let wall_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
+            .map_or(0, |d| d.as_secs());
+        Self::advance_monotonic_reference_secs(wall_secs)
+    }
+
+    /// Enforces monotonic progression of hardware-signed attestation timestamps across sessions.
+    /// Rejects backward time-warped attestation documents while advancing the high-water mark.
+    fn enforce_monotonic_attest_hwm(attest_secs: u64) -> Result<(), ClientError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static ATTEST_HWM_SECS: AtomicU64 = AtomicU64::new(0);
+
+        let mut prev = ATTEST_HWM_SECS.load(Ordering::SeqCst);
+        loop {
+            if prev > 0 && attest_secs.saturating_add(MAX_ATTESTATION_CLOCK_SKEW_SECS) < prev {
+                return Err(ClientError::AttestationValidationFailed(
+                    "Attestation timestamp regressed below monotonic high-water mark",
+                ));
+            }
+            let next = prev.max(attest_secs);
+            match ATTEST_HWM_SECS.compare_exchange_weak(
+                prev,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => prev = actual,
+            }
+        }
+    }
+
+    /// Validates that a live cryptographic challenge-response round-trip completed within
+    /// the strict monotonic interval ceiling (`MAX_CHALLENGE_RESPONSE_INTERVAL_NS`).
+    pub fn validate_challenge_response_interval(rtt_ns: u64) -> Result<(), ClientError> {
+        if rtt_ns > MAX_CHALLENGE_RESPONSE_INTERVAL_NS {
+            return Err(ClientError::AttestationValidationFailed(
+                "Challenge-response interval exceeded monotonic bound",
+            ));
+        }
+        Ok(())
     }
 
     pub fn attest_and_bind(&mut self, manifest_path: &str) -> Result<(), ClientError> {
+        use std::time::Instant;
+
         if manifest_path.trim().is_empty() {
             return Err(ClientError::PcrMismatch(
                 "Manifest path required for PCR policy pinning",
             ));
         }
-        let challenge_nonce = Self::generate_client_challenge_nonce();
+        let challenge_nonce = Self::generate_client_challenge_nonce()?;
+        let challenge_start = Instant::now();
         let resp = match self.send_command(CMD_ATTEST, 0, &challenge_nonce) {
             Ok(r) => r,
             Err(ClientError::ServerStatusError(-110)) => {
@@ -435,6 +563,8 @@ impl NonaClient {
             }
             Err(e) => return Err(e),
         };
+        let rtt_ns = u64::try_from(challenge_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Self::validate_challenge_response_interval(rtt_ns)?;
 
         if resp.len() <= 33 {
             return Err(ClientError::AttestationValidationFailed(
@@ -449,13 +579,17 @@ impl NonaClient {
         let doc_bytes = &resp[33..];
 
         let expected_user_data = sha512_digest(&self.session_pubkey);
-        Self::parse_and_verify_cose_attestation_with_nonce(
+        let verified_attest_secs = Self::verify_live_challenge_attestation_with_root(
             doc_bytes,
             &expected_user_data,
-            Some(&challenge_nonce),
+            &challenge_nonce,
+            rtt_ns,
             manifest_path,
+            &crate::aws_root_ca::AWS_NITRO_ROOT_CA_DER,
         )?;
 
+        self.last_verified_attest_secs = verified_attest_secs;
+        self.challenge_rtt_ns = rtt_ns;
         self.attested = true;
         Ok(())
     }
@@ -578,6 +712,25 @@ impl NonaClient {
         )
     }
 
+    /// Verifies a COSE_Sign1 attestation document against an explicit verified external timestamp
+    /// (`verified_unix_secs`), completely isolated from untrusted local wall-clock time (FR-36-TIMEWARP).
+    pub fn parse_and_verify_cose_attestation_at(
+        doc_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        expected_nonce: Option<&[u8]>,
+        manifest_path: &str,
+        verified_unix_secs: u64,
+    ) -> Result<(), ClientError> {
+        Self::parse_and_verify_cose_attestation_full(
+            doc_bytes,
+            expected_user_data,
+            expected_nonce,
+            manifest_path,
+            &crate::aws_root_ca::AWS_NITRO_ROOT_CA_DER,
+            verified_unix_secs,
+        )
+    }
+
     pub fn parse_and_verify_cose_attestation_with_nonce(
         doc_bytes: &[u8],
         expected_user_data: &[u8; 64],
@@ -590,8 +743,36 @@ impl NonaClient {
             expected_nonce,
             manifest_path,
             &crate::aws_root_ca::AWS_NITRO_ROOT_CA_DER,
-            Self::current_unix_timestamp_secs(),
+            Self::current_monotonic_reference_secs(),
         )
+    }
+
+    /// Verifies a live challenge-response COSE_Sign1 attestation document using:
+    /// 1) Monotonic round-trip interval bound (`rtt_ns <= MAX_CHALLENGE_RESPONSE_INTERVAL_NS`),
+    /// 2) Constant-time cryptographic nonce & user_data key binding,
+    /// 3) Hardware-signed NSM timestamp (`attest_secs`) checked against a monotonic high-water mark,
+    /// 4) Full P-384 X.509 certificate chain validation at `attest_secs` and PCR pinning.
+    ///
+    /// Zero dependency on untrusted host/hypervisor `SystemTime` (FR-36-TIMEWARP).
+    pub fn verify_live_challenge_attestation_with_root(
+        doc_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        challenge_nonce: &[u8; 32],
+        rtt_ns: u64,
+        manifest_path: &str,
+        trusted_root_der: &[u8],
+    ) -> Result<u64, ClientError> {
+        Self::validate_challenge_response_interval(rtt_ns)?;
+        let attest_secs = Self::extract_and_verify_attestation_core(
+            doc_bytes,
+            expected_user_data,
+            Some(challenge_nonce),
+            manifest_path,
+            trusted_root_der,
+            None,
+        )?;
+        Self::enforce_monotonic_attest_hwm(attest_secs)?;
+        Ok(attest_secs)
     }
 
     #[inline(never)]
@@ -769,8 +950,8 @@ impl NonaClient {
         expected_nonce: Option<&[u8]>,
         manifest_path: &str,
         trusted_root_der: &[u8],
-        current_unix_secs: u64,
-    ) -> Result<(), ClientError> {
+        verified_unix_secs: Option<u64>,
+    ) -> Result<u64, ClientError> {
         let claims = Self::extract_attestation_payload_claims(payload_bytes)?;
 
         // 1. Verify User Data Key Binding in Constant Time
@@ -798,7 +979,7 @@ impl NonaClient {
             }
         }
 
-        // 3. Enforce Attestation Timestamp Freshness & Clock-Skew Bounds
+        // 3. Enforce Hardware-Signed Timestamp Presence & Optional External Reference Bounds
         let ts_ms = claims
             .timestamp_ms
             .ok_or(ClientError::AttestationValidationFailed(
@@ -810,15 +991,17 @@ impl NonaClient {
             ));
         }
         let attest_secs = ts_ms / 1000;
-        if attest_secs > current_unix_secs.saturating_add(MAX_ATTESTATION_CLOCK_SKEW_SECS) {
-            return Err(ClientError::AttestationValidationFailed(
-                "Attestation document timestamp is future-dated",
-            ));
-        }
-        if current_unix_secs > attest_secs.saturating_add(MAX_ATTESTATION_AGE_SECS) {
-            return Err(ClientError::AttestationValidationFailed(
-                "Attestation document has expired",
-            ));
+        if let Some(ref_secs) = verified_unix_secs {
+            if attest_secs > ref_secs.saturating_add(MAX_ATTESTATION_CLOCK_SKEW_SECS) {
+                return Err(ClientError::AttestationValidationFailed(
+                    "Attestation document timestamp is future-dated",
+                ));
+            }
+            if ref_secs > attest_secs.saturating_add(MAX_ATTESTATION_AGE_SECS) {
+                return Err(ClientError::AttestationValidationFailed(
+                    "Attestation document has expired",
+                ));
+            }
         }
 
         // 4 & 5. Validate X.509 Certificate Chain up to Pinned Root CA & Verify COSE ES384 Signature
@@ -856,18 +1039,18 @@ impl NonaClient {
             Self::verify_manifest_pcrs(manifest_path, p0, p1, p2)?;
         }
 
-        Ok(())
+        Ok(attest_secs)
     }
 
     #[inline(never)]
-    pub fn parse_and_verify_cose_attestation_full(
+    fn extract_and_verify_attestation_core(
         doc_bytes: &[u8],
         expected_user_data: &[u8; 64],
         expected_nonce: Option<&[u8]>,
         manifest_path: &str,
         trusted_root_der: &[u8],
-        current_unix_secs: u64,
-    ) -> Result<(), ClientError> {
+        verified_unix_secs: Option<u64>,
+    ) -> Result<u64, ClientError> {
         if doc_bytes.len() < 32 {
             return Err(ClientError::CborParseError);
         }
@@ -929,8 +1112,28 @@ impl NonaClient {
             expected_nonce,
             manifest_path,
             trusted_root_der,
-            current_unix_secs,
+            verified_unix_secs,
         )
+    }
+
+    #[inline(never)]
+    pub fn parse_and_verify_cose_attestation_full(
+        doc_bytes: &[u8],
+        expected_user_data: &[u8; 64],
+        expected_nonce: Option<&[u8]>,
+        manifest_path: &str,
+        trusted_root_der: &[u8],
+        current_unix_secs: u64,
+    ) -> Result<(), ClientError> {
+        let _ = Self::extract_and_verify_attestation_core(
+            doc_bytes,
+            expected_user_data,
+            expected_nonce,
+            manifest_path,
+            trusted_root_der,
+            Some(current_unix_secs),
+        )?;
+        Ok(())
     }
 
     fn send_command(
@@ -1031,6 +1234,9 @@ pub const MAX_CBOR_DEPTH: usize = 16;
 pub const MAX_CBOR_COLLECTION_ITEMS: usize = 1024;
 pub const MAX_ATTESTATION_AGE_SECS: u64 = 300;
 pub const MAX_ATTESTATION_CLOCK_SKEW_SECS: u64 = 60;
+pub const MAX_CHALLENGE_RESPONSE_INTERVAL_SECS: u64 = 30;
+pub const MAX_CHALLENGE_RESPONSE_INTERVAL_NS: u64 =
+    MAX_CHALLENGE_RESPONSE_INTERVAL_SECS * 1_000_000_000;
 
 #[allow(clippy::cast_possible_truncation)]
 fn encode_cbor_bstr_header(out: &mut Vec<u8>, len: usize) {

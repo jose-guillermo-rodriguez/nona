@@ -147,6 +147,7 @@ The secp256k1 endomorphism $\phi(P) = \lambda P$ allows decomposing scalar $k$ i
 | **FR-33-SIMDDISPATCH** | Ingestion | Active (Verified) | Vectorized bulk byte normalization (AVX-512 / AVX2 / ARM NEON) with scalar equivalence proofs. Core crypto remains pure verified Rust. |
 | **FR-34-CHUNKSTREAM** | Ingestion | Active (Verified) | Zero-heap C-ABI chunked stream iterator (`nona_udf_chunk_iter_t`) processing arbitrary streams ($N > 10^6$) in fixed 128-element stack windows. |
 | **FR-35-TENANTFENCE** | Microarchitecture | Active (Verified) | Speculative barriers (`LFENCE`/`CSDB`), ring slot cache flushes (`clflush`/`dc cvac`), and register scrubbing. |
+| **FR-36-TIMEWARP** | Environmental Defense | Active (Verified) | Isolates cryptographic attestation & session validity from untrusted hypervisor wall-clocks via monotonic `Instant` challenge-response intervals (`<= 30s`), monotonic timestamp high-water marks, OS CSPRNG nonces, and enclave `ChannelToken` session operation ceilings. |
 
 ---
 

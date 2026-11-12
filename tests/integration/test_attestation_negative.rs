@@ -438,4 +438,108 @@ mod negative_attestation_tests {
             "Verifier must reject future-dated attestation document"
         );
     }
+
+    #[test]
+    fn test_gate_time_warp_immunity_challenge_interval_and_monotonic_hwm() {
+        use nona_core::client::{
+            synthesize_signed_cose_sign1_attestation, MAX_CHALLENGE_RESPONSE_INTERVAL_NS,
+        };
+
+        let pcr0 = [0x11u8; 48];
+        let pcr1 = [0x22u8; 48];
+        let pcr2 = [0x33u8; 48];
+        let manifest_content = format!(
+            r#"{{
+  "schema_version": "2.0.0",
+  "measurements": {{
+    "PCR0": "{}",
+    "PCR1": "{}",
+    "PCR2": "{}"
+  }}
+}}"#,
+            hex::encode(&pcr0),
+            hex::encode(&pcr1),
+            hex::encode(&pcr2)
+        );
+        let manifest = ScopedTempFile::create("time_warp_gate", &manifest_content);
+
+        let pubkey = [0x02u8; 33];
+        let expected_digest = sha512_digest(&pubkey);
+        let nonce_1 = NonaClient::generate_client_challenge_nonce()
+            .expect("OS CSPRNG challenge nonce generation must succeed");
+        let nonce_2 = NonaClient::generate_client_challenge_nonce()
+            .expect("Sequential OS CSPRNG challenge nonce generation must succeed");
+        assert_ne!(
+            nonce_1, nonce_2,
+            "Monotonic sequence counter + CSPRNG must yield distinct nonces (FR-36-TIMEWARP)"
+        );
+
+        let t_base: u64 = 1_785_000_000;
+        let (doc_t1, root_der) = synthesize_signed_cose_sign1_attestation(
+            &expected_digest,
+            Some(&nonce_1),
+            t_base * 1000,
+            &pcr0,
+            &pcr1,
+            &pcr2,
+        );
+
+        // 1. Challenge-response interval exceeding MAX_CHALLENGE_RESPONSE_INTERVAL_NS must fail closed
+        assert!(
+            NonaClient::verify_live_challenge_attestation_with_root(
+                &doc_t1,
+                &expected_digest,
+                &nonce_1,
+                MAX_CHALLENGE_RESPONSE_INTERVAL_NS + 1,
+                manifest.path_str(),
+                &root_der,
+            )
+            .is_err(),
+            "Verifier must reject live challenge-response exceeding monotonic interval bound"
+        );
+
+        // 2. Bounded challenge-response interval succeeds independently of SystemTime
+        let verified_ts = NonaClient::verify_live_challenge_attestation_with_root(
+            &doc_t1,
+            &expected_digest,
+            &nonce_1,
+            5_000_000, // 5 ms monotonic RTT
+            manifest.path_str(),
+            &root_der,
+        )
+        .expect("Valid bounded live challenge-response attestation must succeed");
+        assert_eq!(verified_ts, t_base);
+
+        // 3. Backward time-warped attestation timestamp (< HWM - skew) must fail closed
+        let warped_past_secs = t_base - 600;
+        let (doc_warped, root_warped) = synthesize_signed_cose_sign1_attestation(
+            &expected_digest,
+            Some(&nonce_2),
+            warped_past_secs * 1000,
+            &pcr0,
+            &pcr1,
+            &pcr2,
+        );
+        assert!(
+            NonaClient::verify_live_challenge_attestation_with_root(
+                &doc_warped,
+                &expected_digest,
+                &nonce_2,
+                5_000_000,
+                manifest.path_str(),
+                &root_warped,
+            )
+            .is_err(),
+            "Monotonic high-water mark must reject backward time-warped attestation timestamp"
+        );
+
+        // 4. Monotonic reference clock must refuse backward host wall-clock warps
+        let ref_initial = NonaClient::advance_monotonic_reference_secs(t_base);
+        assert!(ref_initial >= t_base);
+        let ref_after_warp = NonaClient::advance_monotonic_reference_secs(t_base - 10_000);
+        assert!(
+            ref_after_warp >= ref_initial,
+            "Monotonic reference clock must never regress under backward host clock warp"
+        );
+    }
 }

@@ -8,7 +8,7 @@ use crate::attestation::{
 };
 use crate::crypto::{ct_zeroize, sha512_digest};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 pub const AF_VSOCK: i32 = 40;
 pub const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
@@ -32,12 +32,18 @@ pub const NONA_WIRE_ERR_OPAQUE: i32 = -1;
 /// Minimum per-frame wire response floor (250 microseconds) eliminating early-exit timing side channels.
 pub const WIRE_FRAME_FLOOR_NS: u64 = 250_000;
 
+/// Maximum cryptographic operations permitted per ephemeral enclave session key
+/// enforced via a monotonic counter independent of hypervisor clocks (FR-36-TIMEWARP).
+pub const MAX_SESSION_OPS: u64 = 1_000_000;
+
 const SESSION_STATE_UNINIT: u8 = 0;
 const SESSION_STATE_INITIALIZING: u8 = 1;
 const SESSION_STATE_READY: u8 = 2;
 
 struct EnclaveSessionKey {
     state: AtomicU8,
+    epoch: AtomicU64,
+    op_count: AtomicU64,
     privkey: core::cell::UnsafeCell<[u8; 32]>,
     pubkey: core::cell::UnsafeCell<[u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]>,
 }
@@ -46,6 +52,8 @@ unsafe impl Sync for EnclaveSessionKey {}
 
 static SESSION_KEY: EnclaveSessionKey = EnclaveSessionKey {
     state: AtomicU8::new(SESSION_STATE_UNINIT),
+    epoch: AtomicU64::new(0),
+    op_count: AtomicU64::new(0),
     privkey: core::cell::UnsafeCell::new([0u8; 32]),
     pubkey: core::cell::UnsafeCell::new([0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]),
 };
@@ -285,6 +293,7 @@ pub fn purge_session_key_unconditional() {
         ct_zeroize(&mut *SESSION_KEY.privkey.get());
         ct_zeroize(&mut *SESSION_KEY.pubkey.get());
     }
+    SESSION_KEY.op_count.store(0, Ordering::SeqCst);
     SESSION_KEY
         .state
         .store(SESSION_STATE_UNINIT, Ordering::SeqCst);
@@ -384,6 +393,8 @@ fn ensure_session_key_initialized() {
                         (*SESSION_KEY.pubkey.get()).copy_from_slice(&pubkey);
                     }
                     ct_zeroize(&mut privkey.data);
+                    SESSION_KEY.op_count.store(0, Ordering::SeqCst);
+                    SESSION_KEY.epoch.fetch_add(1, Ordering::SeqCst);
                     SESSION_KEY
                         .state
                         .store(SESSION_STATE_READY, Ordering::Release);
@@ -393,6 +404,29 @@ fn ensure_session_key_initialized() {
             _ => {
                 core::hint::spin_loop();
             }
+        }
+    }
+}
+
+/// Advances the enclave's monotonic session operation counter using `ChannelToken`,
+/// failing closed if `MAX_SESSION_OPS` is reached without relying on hypervisor clocks (FR-36-TIMEWARP).
+#[inline(never)]
+fn advance_session_op_counter() -> Result<u64, i32> {
+    let mut prev = SESSION_KEY.op_count.load(Ordering::Acquire);
+    loop {
+        if prev >= MAX_SESSION_OPS {
+            purge_session_key_unconditional();
+            return Err(-1);
+        }
+        let next_seq = prev.saturating_add(1);
+        match SESSION_KEY.op_count.compare_exchange_weak(
+            prev,
+            next_seq,
+            Ordering::SeqCst,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(next_seq),
+            Err(actual) => prev = actual,
         }
     }
 }
@@ -487,6 +521,9 @@ pub fn dispatch_frame_with_slot(
 
             let mut aligned_key = AlignedKeyBuffer { data: [0u8; 32] };
             if use_session_key {
+                if advance_session_op_counter().is_err() {
+                    return (-1, 0);
+                }
                 load_session_privkey_into(&mut aligned_key);
             } else {
                 aligned_key.data.copy_from_slice(&payload[0..32]);
@@ -526,6 +563,9 @@ pub fn dispatch_frame_with_slot(
             // Bind hypervisor attestation strictly to the internal enclave session public key.
             // Private scalar never enters this frame.
             let pubkey = get_or_create_session_pubkey();
+            if advance_session_op_counter().is_err() {
+                return (-1, 0);
+            }
             let user_data_digest = sha512_digest(&pubkey);
 
             let status = unsafe {
@@ -646,7 +686,7 @@ unsafe fn monotonic_now_ns() -> u64 {
         tv_nsec: 0,
     };
     if libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) != 0 {
-        return 0;
+        crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
     }
     let sec = u64::try_from(ts.tv_sec).unwrap_or(0);
     let nsec = u64::try_from(ts.tv_nsec).unwrap_or(0);
