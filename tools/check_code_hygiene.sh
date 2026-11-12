@@ -7,13 +7,15 @@ echo "=========================================================="
 
 ERRORS=0
 
-echo "--> Check 1: Inspecting for AI header banners & syntax narration..."
-BANNERS=$(grep -rn -E "(//[[:space:]]*PROJECT:[[:space:]]*Nona Core Engine|//[[:space:]]*MODULE:.*-)" src/ src/bin/ benches/ || true)
-if [ -n "$BANNERS" ]; then
-    echo "  [HYGIENE FAILURE] Found mechanical header banners:"
-    echo "$BANNERS"
-    ERRORS=$((ERRORS + 1))
-fi
+echo "--> Check 1: Enforcing canonical file-opening allowlist (rejecting AI banners & ASCII boxes)..."
+while IFS= read -r rs_file; do
+    first_line=$(head -n 1 "$rs_file")
+    if [[ ! "$first_line" =~ ^(//!|///|//\ Copyright\ \(c\)|#\!\[|#\[|use\ |pub\ |mod\ |extern\ ) ]]; then
+        echo "  [HYGIENE FAILURE] $rs_file line 1 violates opening allowlist:"
+        echo "    Found: $first_line"
+        ERRORS=$((ERRORS + 1))
+    fi
+done < <(find src tests benches -name "*.rs" 2>/dev/null || true)
 
 LOCK_SLOP=$(grep -rn "Lock-Free Stream Ingestion Perimeter" src/ || true)
 if [ -n "$LOCK_SLOP" ]; then
@@ -71,16 +73,38 @@ cargo clippy --all-targets --features std -- -D warnings
 
 
 # ---------------------------------------------------------
-# Check 8: Dependency License & Copyleft Contamination Audit
+# Check 8: DAG-Complete SPDX Dependency License Allowlist
 # ---------------------------------------------------------
-echo "--> Check 8: Auditing dependencies for Copyleft/GPL contamination..."
-COPYLEFT_HITS=$(cargo metadata --format-version 1 2>/dev/null | grep -iE "\"license\":\s*\"[^\"]*(gpl|agpl|lgpl)" || true)
-if [ -n "$COPYLEFT_HITS" ]; then
-    echo "  [LEGAL VIOLATION] Detected copyleft license in dependency tree:"
-    echo "$COPYLEFT_HITS"
+echo "--> Check 8: Enforcing strict SPDX license allowlist across dependency DAG..."
+if ! python3 -c '
+import json, subprocess, sys
+ALLOWED = {
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MIT OR Apache-2.0",
+    "Apache-2.0 OR MIT",
+    "(MIT OR Apache-2.0) AND Unicode-3.0",
+}
+raw = subprocess.check_output(["cargo", "metadata", "--format-version", "1"], stderr=subprocess.DEVNULL)
+meta = json.loads(raw)
+violations = []
+for pkg in meta.get("packages", []):
+    lic = pkg.get("license")
+    if lic not in ALLOWED:
+        violations.append(f"{pkg['\''name'\'']} {pkg['\''version'\'']}: {lic!r}")
+if violations:
+    for v in violations:
+        print(f"  [LEGAL VIOLATION] Unapproved or missing SPDX license: {v}")
+    sys.exit(1)
+'; then
     ERRORS=$((ERRORS + 1))
 else
-    echo "  ✓ Zero copyleft (GPL/AGPL) dependencies detected in build graph."
+    echo "  ✓ 100% of packages in dependency DAG conform to approved SPDX allowlist."
 fi
 
 
@@ -89,7 +113,6 @@ fi
 # ---------------------------------------------------------
 echo "--> Check 9: Auditing for true dead code, orphaned modules, and blanket suppressions..."
 
-# 1. Prohibit blanket crate-level #![allow(dead_code)]
 BLANKET_DEAD=$(grep -rn "#\!\[allow(dead_code)\]" src/ || true)
 if [ -n "$BLANKET_DEAD" ]; then
     echo "  [HYGIENE FAILURE] Found blanket #![allow(dead_code)] hiding potential dead code:"
@@ -99,7 +122,6 @@ else
     echo "  ✓ Zero blanket #![allow(dead_code)] suppressions found in src/."
 fi
 
-# 2. Check for orphaned Rust files not referenced in lib.rs or binaries
 for rs in $(find src -name "*.rs" | grep -v "lib.rs" | grep -v "bin/"); do
     mod_name=$(basename "$rs" .rs)
     if [ "$mod_name" != "mod" ]; then
@@ -110,7 +132,6 @@ for rs in $(find src -name "*.rs" | grep -v "lib.rs" | grep -v "bin/"); do
     fi
 done
 
-# 3. Enforce strict dead code rejection across the library build graph
 DEAD_WARNINGS=$(cargo check --lib --no-default-features 2>&1 | grep "warning: .* is never used" || true)
 if [ -n "$DEAD_WARNINGS" ]; then
     echo "  [DEAD CODE WARNING] Detected unused code in core library:"
@@ -157,6 +178,19 @@ if [ -n "$NON_NORMATIVE_TAGS" ]; then
     ERRORS=$((ERRORS + 1))
 else
     echo "  ✓ All bracketed requirement tags conform to normative functional specifications."
+fi
+
+# ---------------------------------------------------------
+# Check 13: Zero-Heap Core Engine Invariant (#![no_std] Static Memory)
+# ---------------------------------------------------------
+echo "--> Check 13: Enforcing zero dynamic heap allocation (alloc) in src/..."
+ALLOC_IMPORTS=$(grep -rn -E "(extern crate alloc|use alloc::)" src/ || true)
+if [ -n "$ALLOC_IMPORTS" ]; then
+    echo "  [MEMORY INVARIANT VIOLATION] Dynamic heap allocation (alloc) detected in src/:"
+    echo "$ALLOC_IMPORTS"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Zero dynamic heap allocations (alloc) in core engine."
 fi
 
 if [ "$ERRORS" -gt 0 ]; then

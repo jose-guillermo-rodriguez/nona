@@ -6,6 +6,7 @@
 //! Validates that the verifier fails closed against:
 //! 1. Dummy/unverified COSE Sign1 ECDSA signatures (prevents signature bypass).
 //! 2. Manifest substring injection attacks (prevents policy bypass via JSON comments/unverified keys).
+//! 3. Simulation manifest key-shadowing attacks (enforces strict AST schema with deny_unknown_fields).
 
 #[cfg(feature = "std")]
 mod negative_attestation_tests {
@@ -130,6 +131,38 @@ mod negative_attestation_tests {
         assert!(
             verify_res.is_err(),
             "[HIGH-ASSURANCE VIOLATION] Verifier accepted deceptive manifest via raw substring search! AST key parsing is missing."
+        );
+    }
+
+    #[test]
+    fn test_gate_reject_simulation_manifest_key_shadowing() {
+        let valid_pcr0 = hex::encode(&[0x11u8; 48]);
+        let valid_pcr1 = hex::encode(&[0x22u8; 48]);
+        let valid_pcr2 = hex::encode(&[0x33u8; 48]);
+
+        let shadowed_manifest_content = format!(
+            r#"{{
+  "schema_version": "2.0.0",
+  "untrusted_audit_history": {{
+    "PCR0": "{valid_pcr0}",
+    "PCR1": "{valid_pcr1}",
+    "PCR2": "{valid_pcr2}"
+  }},
+  "measurements": {{
+    "PCR0": "invalid_short_pcr",
+    "PCR1": "invalid_short_pcr",
+    "PCR2": "invalid_short_pcr"
+  }}
+}}"#
+        );
+
+        let shadowed_manifest = ScopedTempFile::create("shadowed_sim_manifest", &shadowed_manifest_content);
+
+        let verify_res = NonaClient::verify_simulation_manifest(shadowed_manifest.path_str());
+
+        assert!(
+            verify_res.is_err(),
+            "[HIGH-ASSURANCE VIOLATION] Simulation manifest verifier accepted shadowed keys via substring find()! Strict AST schema is missing."
         );
     }
 }
