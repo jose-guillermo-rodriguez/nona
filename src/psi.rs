@@ -1773,42 +1773,19 @@ pub fn clamp_noisy_cardinality(raw_cardinality: u64, noise: i64, n_elements: u64
 }
 
 #[cfg(not(verus))]
-#[inline(always)]
+#[inline(never)]
 /// Satisfies [FR-22-PSICA]
-/// Retrieves 32 bits of entropy from OS/enclave runtime with architectural fallback.
-fn get_system_entropy_u64() -> u64 {
-    #[allow(unused_variables, unused_mut)]
-    let mut seed: u64 = 0;
-    #[cfg(target_os = "macos")]
-    unsafe {
-        extern "C" {
-            fn getentropy(buf: *mut core::ffi::c_void, buflen: usize) -> core::ffi::c_int;
-        }
-        if getentropy((&raw mut seed).cast::<core::ffi::c_void>(), 8) == 0 {
-            return seed;
-        }
+/// Harvests 64 bits of hardware entropy exclusively via direct `/dev/nsm` IOCTL.
+/// Immediately aborts via `zeroize_and_abort` if NSM entropy is unavailable.
+fn get_nsm_entropy_u64() -> u64 {
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::attestation::nsm_get_random_u64()
     }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        extern "C" {
-            fn getrandom(
-                buf: *mut core::ffi::c_void,
-                buflen: usize,
-                flags: core::ffi::c_uint,
-            ) -> isize;
-        }
-        if getrandom((&raw mut seed).cast::<core::ffi::c_void>(), 8, 0) == 8 {
-            return seed;
-        }
+    #[cfg(target_os = "none")]
+    {
+        crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
     }
-    #[cfg(all(target_os = "none", target_arch = "x86_64"))]
-    unsafe {
-        let mut rdrand_val: u64 = 0;
-        if core::arch::x86_64::_rdrand64_step(&mut rdrand_val) == 1 {
-            return rdrand_val;
-        }
-    }
-    crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
 }
 
 #[cfg(not(verus))]
@@ -1816,7 +1793,7 @@ fn get_system_entropy_u64() -> u64 {
 /// Satisfies [FR-22-PSICA]
 /// In-enclave constant-time noise injection and bounds clamping for PSI-Cardinality mode.
 pub fn inject_differential_privacy_noise(raw_cardinality: u64, n_elements: usize) -> u64 {
-    let entropy = get_system_entropy_u64();
+    let entropy = get_nsm_entropy_u64();
     let noise = sample_discrete_laplace_noise_from_entropy(entropy);
     clamp_noisy_cardinality(raw_cardinality, noise, n_elements as u64)
 }
@@ -2202,27 +2179,33 @@ mod tests {
         first_idx.copy_from_slice(&match_indices.0[0..4]);
         assert_eq!(u32::from_le_bytes(first_idx), 1);
 
-        // Phase 2: Intersect in PSI_CA (Shannon Entropy Decimation) mode
-        card_out.0 = 0;
-        let st_ca = unsafe {
-            nona_phase2_intersect_impl(
-                blinded_a.0.as_ptr(),
-                64,
-                blinded_b.0.as_ptr(),
-                64,
-                2,
-                match_indices.0.as_mut_ptr(),
-                64,
-                NONA_FLAG_PSI_CA,
-                &raw mut card_out.0,
-            )
-        };
-        assert_eq!(st_ca, NONA_SUCCESS);
-        assert!(
-            card_out.0 <= 2,
-            "Cardinality under DP must be clamped within [0, n_elements]"
-        );
-        assert_eq!(match_indices.0, [0u8; 64]);
+        // Phase 2: Intersect in PSI_CA mode (requires /dev/nsm hardware entropy)
+        if std::path::Path::new("/dev/nsm").exists() {
+            card_out.0 = 0;
+            let st_ca = unsafe {
+                nona_phase2_intersect_impl(
+                    blinded_a.0.as_ptr(),
+                    64,
+                    blinded_b.0.as_ptr(),
+                    64,
+                    2,
+                    match_indices.0.as_mut_ptr(),
+                    64,
+                    NONA_FLAG_PSI_CA,
+                    &raw mut card_out.0,
+                )
+            };
+            assert_eq!(st_ca, NONA_SUCCESS);
+            assert!(
+                card_out.0 <= 2,
+                "Cardinality under DP must be clamped within [0, n_elements]"
+            );
+            assert_eq!(match_indices.0, [0u8; 64]);
+        } else {
+            let noise = sample_discrete_laplace_noise_from_entropy(0x0123_4567_89ab_cdef);
+            let clamped = clamp_noisy_cardinality(1, noise, 2);
+            assert!(clamped <= 2);
+        }
     }
 
     #[test]

@@ -241,7 +241,29 @@ impl NonaClient {
         self.send_command(CMD_BLIND_PHASE1, FLAG_USE_SESSION_KEY, raw_elements)
     }
 
-    pub fn blind_stream_chunked(&mut self, stream_data: &[u8]) -> Result<Vec<u8>, ClientError> {
+    pub fn blind_phase1_with_key(
+        &mut self,
+        key: &[u8; 32],
+        raw_elements: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
+        if !self.attested {
+            return Err(ClientError::AttestationValidationFailed(
+                "Channel unauthenticated: attestation required before blinding",
+            ));
+        }
+        let mut framed = Vec::with_capacity(32 + raw_elements.len());
+        framed.extend_from_slice(key);
+        framed.extend_from_slice(raw_elements);
+        let res = self.send_command(CMD_BLIND_PHASE1, 0, &framed);
+        framed.zeroize();
+        res
+    }
+
+    fn blind_stream_chunked_inner(
+        &mut self,
+        explicit_key: Option<&[u8; 32]>,
+        stream_data: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
         if !self.attested {
             return Err(ClientError::AttestationValidationFailed(
                 "Channel unauthenticated: attestation required before blinding",
@@ -273,7 +295,10 @@ impl NonaClient {
                 }
             }
 
-            let blinded_chunk = self.blind_phase1(&chunk_staging.data)?;
+            let blinded_chunk = match explicit_key {
+                Some(key) => self.blind_phase1_with_key(key, &chunk_staging.data)?,
+                None => self.blind_phase1(&chunk_staging.data)?,
+            };
             results.extend_from_slice(&blinded_chunk[..active_elements * ELEMENT_BYTES]);
             offset += current_chunk_bytes;
         }
@@ -283,6 +308,18 @@ impl NonaClient {
             return Err(ClientError::InvalidHeader);
         }
         Ok(results)
+    }
+
+    pub fn blind_stream_chunked(&mut self, stream_data: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.blind_stream_chunked_inner(None, stream_data)
+    }
+
+    pub fn blind_stream_chunked_with_key(
+        &mut self,
+        key: &[u8; 32],
+        stream_data: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
+        self.blind_stream_chunked_inner(Some(key), stream_data)
     }
 
     pub fn verify_manifest_pcrs(

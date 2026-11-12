@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "nona.h"
 
 int main(void) {
@@ -164,17 +166,35 @@ int main(void) {
     // Step 5: Test Cardinality-Only Mode (NONA_FLAG_PSI_CA = 1)
     // ------------------------------------------------------------------------
     uint64_t ca_cardinality NONA_ALIGN(64) = 0;
-    int32_t ca_rc = nona_phase2_intersect(
-        blind_a_r2, buf_len_a,
-        blind_b_r2, buf_len_b,
-        count_a,
-        match_indices_out, buf_len_a,
-        NONA_FLAG_PSI_CA,
-        &ca_cardinality
-    );
-    assert(ca_rc == 0);
-    // FR-22: Under Cardinality Mode, DP noise is injected and clamped to [0, count_a]
-    assert(ca_cardinality <= count_a);
+    if (access("/dev/nsm", R_OK | W_OK) == 0) {
+        int32_t ca_rc = nona_phase2_intersect(
+            blind_a_r2, buf_len_a,
+            blind_b_r2, buf_len_b,
+            count_a,
+            match_indices_out, buf_len_a,
+            NONA_FLAG_PSI_CA,
+            &ca_cardinality
+        );
+        assert(ca_rc == 0);
+        assert(ca_cardinality <= count_a);
+    } else {
+        pid_t pid = fork();
+        assert(pid >= 0);
+        if (pid == 0) {
+            (void)nona_phase2_intersect(
+                blind_a_r2, buf_len_a,
+                blind_b_r2, buf_len_b,
+                count_a,
+                match_indices_out, buf_len_a,
+                NONA_FLAG_PSI_CA,
+                &ca_cardinality
+            );
+            _exit(0);
+        }
+        int wstatus = 0;
+        assert(waitpid(pid, &wstatus, 0) == pid);
+        assert(WIFSIGNALED(wstatus) || (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) != 0));
+    }
 
     // Secure key zeroization
     nona_ct_zeroize(key_a, sizeof(key_a));

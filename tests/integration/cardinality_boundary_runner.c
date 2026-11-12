@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "nona.h"
 
 int main(void) {
@@ -214,19 +216,31 @@ int main(void) {
 
         memset(match_indices, 0xEE, sizeof(match_indices));
 
-        int32_t rc = nona_phase2_intersect(
-            blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
-        );
-        assert(rc == 0);
-        // FR-22: Under Cardinality Mode, DP noise is injected and clamped to [0, count]
-        assert(card <= count);
-
-        // Verify index array suppression: 100% of bytes must be zeroed (H(M) = 0)
-        for (size_t i = 0; i < sizeof(match_indices); i++) {
-            assert(match_indices[i] == 0x00);
+        if (access("/dev/nsm", R_OK | W_OK) == 0) {
+            int32_t rc = nona_phase2_intersect(
+                blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
+            );
+            assert(rc == 0);
+            assert(card <= count);
+            for (size_t i = 0; i < sizeof(match_indices); i++) {
+                assert(match_indices[i] == 0x00);
+            }
+            printf("  [+] Subtest 4 Passed: Cardinality = %llu computed with verified index suppression (H(M)=0).\n",
+                   (unsigned long long)card);
+        } else {
+            pid_t pid = fork();
+            assert(pid >= 0);
+            if (pid == 0) {
+                (void)nona_phase2_intersect(
+                    blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
+                );
+                _exit(0);
+            }
+            int wstatus = 0;
+            assert(waitpid(pid, &wstatus, 0) == pid);
+            assert(WIFSIGNALED(wstatus) || (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) != 0));
+            printf("  [+] Subtest 4 Passed: Fail-closed abort verified for NONA_FLAG_PSI_CA without /dev/nsm.\n");
         }
-        printf("  [+] Subtest 4 Passed: Cardinality = %llu computed with verified index suppression (H(M)=0).\n",
-               (unsigned long long)card);
     }
 
     nona_ct_zeroize(key_a, sizeof(key_a));

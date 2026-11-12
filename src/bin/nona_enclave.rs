@@ -7,29 +7,21 @@
 #[link(name = "c")]
 extern "C" {}
 
-// Fallback loop for non-POSIX bare-metal compilation checks
 #[cfg(all(not(feature = "std"), target_os = "none"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-#[cfg(all(not(feature = "std"), target_os = "none"))]
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    nona_core::exception::zeroize_and_abort(-99);
 }
 
 #[cfg(all(not(feature = "std"), not(target_os = "none")))]
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let port = nona_core::enclave_server::DEFAULT_VSOCK_PORT;
-    let unix_sock = nona_core::enclave_server::DEFAULT_UNIX_SOCKET;
-    unsafe { nona_core::enclave_server::run_dual_server(port, unix_sock) }
+    let status = unsafe { nona_core::enclave_server::run_vsock_server(port) };
+    if status != 0 {
+        nona_core::exception::zeroize_and_abort(status);
+    }
+    0
 }
 
 #[cfg(feature = "std")]
@@ -71,16 +63,8 @@ fn main() {
     }
 }
 
-// Canonical Linux x86-64 ELF entry point for standalone bare-metal execution
-#[cfg(all(not(feature = "std"), target_os = "none", target_arch = "x86_64"))]
+#[cfg(all(not(feature = "std"), target_os = "none"))]
 #[no_mangle]
 pub unsafe extern "C" fn _start() -> ! {
-    let ret = main(0, core::ptr::null());
-    core::arch::asm!(
-        "mov eax, 231", // SYS_exit_group
-        "mov edi, {0:e}",
-        "syscall",
-        in(reg) ret,
-        options(noreturn)
-    );
+    nona_core::exception::zeroize_and_abort(nona_core::gatekeeper::NONA_ERR_INTERNAL_PANIC);
 }

@@ -29,7 +29,7 @@ The core engine is a zero-dependency, statically verified cryptographic applianc
 - **Volatile Entropy Collapse:** Upon function completion, context destruction, or signal termination (`SIGINT`, `SIGTERM`), all volatile storage regions holding private scalars or intermediate coordinates undergo constant-time zeroization bounded by sequential memory barriers (`compiler_fence(Ordering::SeqCst)`):
   $$H(R) = 0 \text{ bits}$$
 - **Deterministic Single-Threaded Execution:** The enclave execution substrate is strictly single-threaded and lock-free. Intra-enclave shared-memory concurrency is disallowed to eliminate cross-thread cache contention, hyperthreading execution-port leakage, and memory-locking quota collisions.
-- **Fail-Stop Entropy Policy:** Systemic entropy generation (via OS syscalls, hardware RDRAND/RDSEED, or AWS Nitro NSM) adheres to an uncompromising fail-stop invariant. If entropy harvest fails, times out, or returns a short read, the runtime executes `zeroize_and_abort(NONA_ERR_INTERNAL_PANIC)`. Degraded fallback modes, pseudorandom expansions, static seeding, or unverified entropy harvesting are strictly rejected.
+- **Fail-Stop Entropy Policy:** All runtime entropy and PRNG seeding is sourced exclusively via direct `/dev/nsm` `GetRandom` kernel `ioctl` requests (`NSM_IOCTL_RAW`). If `/dev/nsm` is unavailable, `ioctl` fails, CBOR decoding fails, a short read occurs, or an all-zero block is returned, the runtime immediately executes `zeroize_and_abort(NONA_ERR_INTERNAL_PANIC)`. All fallbacks to CPU RDRAND/RDSEED/RNDR, OS RNG syscalls, pseudo-entropy, or system clocks are strictly prohibited.
 ---
 
 ## 2. Mathematical Protocol Specification

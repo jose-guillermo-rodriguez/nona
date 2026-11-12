@@ -710,9 +710,13 @@ fn run_match(config: &CliConfig) -> Result<(), (String, i32)> {
     }
 
     let mut client = connect_client(config)?;
-    let blinded_local = client
-        .blind_stream_chunked(&stream_payload)
-        .map_err(|e| (format!("Phase 1 blinding stream failed: {e:?}"), 1))?;
+    let blinded_local = if config.dev_simulation {
+        let sim_key = [0x42u8; 32];
+        client.blind_stream_chunked_with_key(&sim_key, &stream_payload)
+    } else {
+        client.blind_stream_chunked(&stream_payload)
+    }
+    .map_err(|e| (format!("Phase 1 blinding stream failed: {e:?}"), 1))?;
 
     let flags = if config.cardinality_only {
         NONA_FLAG_PSI_CA
@@ -840,9 +844,13 @@ fn run_blind(config: &CliConfig) -> Result<(), (String, i32)> {
     }
 
     let mut client = connect_client(config)?;
-    let blinded = client
-        .blind_stream_chunked(&stream_payload)
-        .map_err(|e| (format!("Phase 1 blinding failed: {e:?}"), 1))?;
+    let blinded = if config.dev_simulation {
+        let sim_key = [0x42u8; 32];
+        client.blind_stream_chunked_with_key(&sim_key, &stream_payload)
+    } else {
+        client.blind_stream_chunked(&stream_payload)
+    }
+    .map_err(|e| (format!("Phase 1 blinding failed: {e:?}"), 1))?;
 
     if let Some(ref out_path) = config.output_file {
         fs::write(out_path, &blinded)

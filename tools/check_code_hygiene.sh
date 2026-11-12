@@ -193,6 +193,19 @@ else
     echo "  ✓ Zero dynamic heap allocations (alloc) in core engine."
 fi
 
+# ---------------------------------------------------------
+# Check 14: Exclusive Hardware NSM Entropy Invariant
+# ---------------------------------------------------------
+echo "--> Check 14: Enforcing exclusive /dev/nsm hardware entropy (zero OS/CPU RNG fallbacks)..."
+FALLBACK_RNG=$(grep -rn -E "\b(getentropy|getrandom|_rdrand|_rdseed)\b|s3_3_c2_c4_0" src/ || true)
+if [ -n "$FALLBACK_RNG" ]; then
+    echo "  [ENTROPY INVARIANT VIOLATION] Non-NSM entropy fallback detected in src/:"
+    echo "$FALLBACK_RNG"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Zero non-NSM entropy fallbacks detected in src/."
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo "=========================================================="
     echo "[HYGIENE SUITE FAILED] Total violations detected: $ERRORS"

@@ -275,12 +275,20 @@ fn test_cli_blind_and_e2e_match_pipeline() {
         stdin.write_all(local_records.as_bytes()).unwrap();
     }
     let card_output = child_card.wait_with_output().unwrap();
-    assert_eq!(card_output.status.code(), Some(0));
-    let card_str = String::from_utf8_lossy(&card_output.stdout)
-        .trim()
-        .to_string();
-    let card_val: Result<u64, _> = card_str.parse();
-    assert!(card_val.is_ok());
+    if std::path::Path::new("/dev/nsm").exists() {
+        assert_eq!(card_output.status.code(), Some(0));
+        let card_str = String::from_utf8_lossy(&card_output.stdout)
+            .trim()
+            .to_string();
+        let card_val: Result<u64, _> = card_str.parse();
+        assert!(card_val.is_ok());
+    } else {
+        assert_ne!(
+            card_output.status.code(),
+            Some(0),
+            "Cardinality mode MUST fail closed via zeroize_and_abort when /dev/nsm is absent"
+        );
+    }
 
     // Clean up test files
     let _ = fs::remove_file(target_bin_path);

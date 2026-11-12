@@ -46,7 +46,7 @@ All external interactions pass across the AF_VSOCK / C-ABI boundary, where all i
 
 ### 2.5 Malicious Entropy Injection
 - Threat: The host hypervisor returns degraded, static, or predictable random numbers to weaken blinding factors.
-- Defense: Entropy is harvested strictly from the hardware Nitro Security Module (NSM) or hardware RDRAND/RDSEED. Short reads, timeouts, or harvest failures trigger an immediate zeroize_and_abort.
+- Defense: Entropy is harvested solely via direct `/dev/nsm` `GetRandom` IOCTL requests. Short reads, all-zero blocks, device unavailability, or harvest failures trigger an immediate `zeroize_and_abort(NONA_ERR_INTERNAL_PANIC)` with zero fallback to CPU RNG instructions, OS syscalls, or system clocks.
 
 ---
 
