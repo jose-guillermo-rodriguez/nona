@@ -1,4 +1,4 @@
-// BINARY: nona_enclave - AWS Nitro Confidential Enclave AF_VSOCK & AF_UNIX Daemon
+//! AWS Nitro Confidential Enclave daemon entrypoint.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), no_main)]

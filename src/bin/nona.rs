@@ -1,6 +1,4 @@
-// ============================================================================
-// BINARY: nona - Ergonomic Developer CLI & POSIX Streaming Interlock
-// ============================================================================
+//! Developer CLI and POSIX streaming interlock entrypoint.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

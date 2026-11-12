@@ -1,5 +1,4 @@
-// ============================================================================
-// ============================================================================
+//! Integration test harness verifying host-enclave wire dispatch and protocol frames.
 
 use nona_core::enclave_server::{
     dispatch_frame, EnclaveFrameBuffer, EnclaveRequestHeader, CMD_ATTEST, CMD_BLIND_PHASE1,
