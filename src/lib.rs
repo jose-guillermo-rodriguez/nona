@@ -72,7 +72,8 @@ pub use crate::crypto::nona_adaptive_psi_route;
 pub use crate::obfuscation::nona_permute_index;
 
 pub use crate::psi::{
-    nona_phase1_blind, nona_phase1_blind_impl, nona_phase2_intersect, nona_phase2_intersect_impl,
+    NONA_FLAG_FULL_PSI, NONA_FLAG_PSI_CA, NONA_FLAG_PSI_PR, NONA_FLAG_PSI_SUM, nona_phase1_blind,
+    nona_phase1_blind_impl, nona_phase2_intersect, nona_phase2_intersect_impl,
     nona_phase2_intersect_payload, nona_phase2_reblind, nona_phase2_reblind_impl,
 };
 

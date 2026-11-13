@@ -2383,29 +2383,49 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
     let n_b = len_b / 32;
 
     if n_a == 0 || n_b == 0 || n_elements == 0 {
-        return -3;
+        return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+
+    if (flags & !(NONA_FLAG_PSI_PR | NONA_FLAG_PSI_SUM)) != 0 {
+        return crate::gatekeeper::NONA_ERR_INVALID_FLAGS;
     }
 
     let is_pr = (flags & NONA_FLAG_PSI_PR) != 0;
     let is_sum = (flags & NONA_FLAG_PSI_SUM) != 0;
 
     if is_pr && (payloads_b.is_null() || payloads_out.is_null()) {
-        return -1;
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
     }
 
-    if is_sum && sum_out.is_null() {
-        return -1;
+    if is_pr && (((payloads_b as usize) | (payloads_out as usize)) & 7) != 0 {
+        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
     }
 
-    if is_pr
-        && !crate::gatekeeper::is_disjoint(
-            payloads_b.cast::<u8>(),
-            n_b * 8,
-            payloads_out.cast_const().cast::<u8>(),
-            out_capacity * 8,
-        )
-    {
-        return -4;
+    if is_sum {
+        crate::validate_ffi_ptr!(sum_out, 8, crate::gatekeeper::NONA_ERR_NULL_POINTER);
+    }
+
+    if is_pr {
+        let Some(payloads_b_bytes) = n_b.checked_mul(8) else {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        };
+        let Some(payloads_out_bytes) = n_elements.checked_mul(8) else {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        };
+        let pb_ptr = payloads_b.cast::<u8>();
+        let po_ptr = payloads_out.cast_const().cast::<u8>();
+        if !crate::gatekeeper::is_disjoint(pb_ptr, payloads_b_bytes, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(blinded_a, len_a, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(blinded_b, len_b, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(
+                match_indices_out.cast_const(),
+                out_capacity,
+                po_ptr,
+                payloads_out_bytes,
+            )
+        {
+            return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
+        }
     }
 
     let mut total_cardinality: u64 = 0;
@@ -2450,7 +2470,7 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
                 );
             }
 
-            if is_pr && card_idx < out_capacity {
+            if is_pr && card_idx < n_elements {
                 *payloads_out.add(card_idx) = element_payload_sum;
             }
 
