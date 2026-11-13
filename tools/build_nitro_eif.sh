@@ -87,10 +87,10 @@ CONTAINER_BIN="${CONTAINER_BIN:-${PODMAN_BIN:-}}"
 if [ -z "$CONTAINER_BIN" ] || ! command -v "$CONTAINER_BIN" &>/dev/null; then
     if command -v nitro-cli &>/dev/null && command -v docker &>/dev/null; then
         CONTAINER_BIN="$(command -v docker)"
-    elif command -v docker &>/dev/null; then
-        CONTAINER_BIN="$(command -v docker)"
     elif command -v podman &>/dev/null; then
         CONTAINER_BIN="$(command -v podman)"
+    elif command -v docker &>/dev/null; then
+        CONTAINER_BIN="$(command -v docker)"
     elif [ -x "${NONA_ROOT}/.bin/podman" ]; then
         CONTAINER_BIN="${NONA_ROOT}/.bin/podman"
     elif [ -x "${NONA_ROOT}/../.bin/podman" ]; then
