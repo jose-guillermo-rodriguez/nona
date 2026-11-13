@@ -8,7 +8,7 @@
 
 The core engine (`libnona_core`) is a zero-dependency, `#![no_std]` high-assurance C-ABI primitive engineered for Private Set Intersection (PSI), vectorized database UDF acceleration, deterministic byte normalization, and constant-time index obfuscation. Supporting developer CLI utilities, NSM drivers, and test harnesses utilize pinned, offline-vendored dependencies. Designed as a foundational primitive for institutional and confidential computing environments, Nona guarantees compile-time memory safety via **146 machine-checked Verus SMT targets (50 ghost lemmas + 96 verified executive & boundary contracts)** and total absence of runtime dynamic heap allocation (`malloc`/`free`/`realloc`/`calloc`) strictly for `#![no_std]` targets compiled under `--no-default-features`.
 
-> **Release Provenance:** Initial open-source release v0.1.0, consolidated from internal high-assurance verification and certification trees.
+> **Release Provenance:** Public open-source release v1.0.1 (Hardening Pass 1 on the 1.0.0-RELEASE specification), formally verified in Verus (146 SMT targets) and hardware-validated on AWS Nitro Enclaves.
 
 ---
 

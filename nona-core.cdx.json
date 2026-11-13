@@ -19,52 +19,52 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "pkg:cargo/nona-core@0.1.0",
+      "bom-ref": "pkg:cargo/nona-core@1.0.1",
       "author": "Jose Guillermo Rodriguez <jose-guillermo-rodriguez@users.noreply.github.com>",
       "name": "nona-core",
-      "version": "0.1.0",
+      "version": "1.0.1",
       "scope": "required",
       "licenses": [
         {
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/nona-core@0.1.0",
+      "purl": "pkg:cargo/nona-core@1.0.1",
       "components": [
         {
           "type": "library",
-          "bom-ref": "pkg:cargo/nona-core@0.1.0 bin-target-0",
+          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-0",
           "name": "nona_core",
-          "version": "0.1.0",
-          "purl": "pkg:cargo/nona-core@0.1.0#src/lib.rs"
+          "version": "1.0.1",
+          "purl": "pkg:cargo/nona-core@1.0.1#src/lib.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@0.1.0 bin-target-1",
+          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-1",
           "name": "fuzz_ingest",
-          "version": "0.1.0",
-          "purl": "pkg:cargo/nona-core@0.1.0#fuzz/fuzz_targets/fuzz_ingest.rs"
+          "version": "1.0.1",
+          "purl": "pkg:cargo/nona-core@1.0.1#fuzz/fuzz_targets/fuzz_ingest.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@0.1.0 bin-target-2",
+          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-2",
           "name": "fuzz_wire_dispatch",
-          "version": "0.1.0",
-          "purl": "pkg:cargo/nona-core@0.1.0#fuzz/fuzz_targets/fuzz_wire_dispatch.rs"
+          "version": "1.0.1",
+          "purl": "pkg:cargo/nona-core@1.0.1#fuzz/fuzz_targets/fuzz_wire_dispatch.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@0.1.0 bin-target-3",
+          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-3",
           "name": "nona",
-          "version": "0.1.0",
-          "purl": "pkg:cargo/nona-core@0.1.0#src/bin/nona.rs"
+          "version": "1.0.1",
+          "purl": "pkg:cargo/nona-core@1.0.1#src/bin/nona.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@0.1.0 bin-target-4",
+          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-4",
           "name": "nona_enclave",
-          "version": "0.1.0",
-          "purl": "pkg:cargo/nona-core@0.1.0#src/bin/nona_enclave.rs"
+          "version": "1.0.1",
+          "purl": "pkg:cargo/nona-core@1.0.1#src/bin/nona_enclave.rs"
         }
       ]
     },
@@ -292,7 +292,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:cargo/nona-core@0.1.0",
+      "ref": "pkg:cargo/nona-core@1.0.1",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186",
         "registry+https://github.com/rust-lang/crates.io-index#zeroize@1.9.0"
