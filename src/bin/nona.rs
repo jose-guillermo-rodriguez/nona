@@ -544,8 +544,30 @@ fn normalize_records(raw_records: &[String]) -> (Vec<[u8; 32]>, Vec<usize>) {
 }
 
 #[cfg(feature = "std")]
+fn nitro_hardware_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/sys/module/nitro_enclaves").exists()
+            || match std::fs::symlink_metadata("/dev/nitro_enclaves") {
+                Ok(_) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+            }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 fn connect_raw(config: &CliConfig) -> Result<NonaClient, (String, i32)> {
-    let mut client = if let Some(port) = config.vsock_port {
+    let effective_vsock_port = config.vsock_port.or_else(|| {
+        if !config.dev_simulation && nitro_hardware_present() {
+            Some(nona_core::client::DEFAULT_VSOCK_PORT)
+        } else {
+            None
+        }
+    });
+    let mut client = if let Some(port) = effective_vsock_port {
         NonaClient::connect_vsock(port)
             .map_err(|e| (format!("Failed to connect to VSOCK port {port}: {e:?}"), 1))?
     } else {

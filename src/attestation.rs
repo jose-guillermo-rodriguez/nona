@@ -8,8 +8,10 @@ use crate::psi::JacobianPoint;
 // Linux NSM Kernel ioctl ABI Constants
 
 pub const NSM_MAGIC: u8 = 0x0A;
-/// _IOWR(0x0A, 0x0, sizeof(NsmRawMessage) = 32) = 0xC0200A00
+/// _IOWR(0x0A, 0x0, sizeof(NsmRawMessage) = 32) = 0xC0200A00 (Linux 6.8+ mainline NSM driver)
 pub const NSM_IOCTL_RAW: u64 = 0xC020_0A00;
+/// Legacy Amazon Linux 2 Nitro Enclave kernel (4.14) NSM driver ioctl command number (`cmp w1, #0x5`).
+pub const NSM_IOCTL_RAW_AL2: u64 = 0x5;
 
 pub const NONA_ERR_NSM_UNAVAILABLE: i32 = -110;
 pub const NONA_ERR_NSM_IOCTL_FAILED: i32 = -111;
@@ -190,13 +192,12 @@ pub fn encode_nsm_get_random_request(out_buf: &mut [u8]) -> Result<usize, i32> {
     Ok(REQ_BYTES.len())
 }
 
-/// Parses a canonical CBOR NSM `GetRandom` response map:
-/// `{"GetRandom": {"random": <bstr>}}`
-/// Returns the raw hardware entropy byte slice inside `resp_buf`.
+/// Parses a CBOR NSM `GetRandom` response map into `out`:
+/// Supports both `{"GetRandom": {"random": <bstr>}}` (CBOR major 2) and
+/// AWS `aws-nitro-enclaves-nsm-api` `{"GetRandom": {"random": [u8; N]}}` (CBOR major 4).
+/// Returns the number of decoded random bytes written into `out`.
 #[allow(clippy::cast_possible_truncation)]
-pub fn parse_nsm_get_random_response(resp_buf: &[u8]) -> Result<&[u8], i32> {
-    // Minimum structure:
-    // 0xa1 (map 1) + 0x69 "GetRandom" (10 B) + 0xa1 (map 1) + 0x66 "random" (7 B) + bstr header (>= 2 B)
+pub fn parse_nsm_get_random_response_into(resp_buf: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     if resp_buf.len() < 21 {
         return Err(NONA_ERR_NSM_IOCTL_FAILED);
     }
@@ -212,11 +213,7 @@ pub fn parse_nsm_get_random_response(resp_buf: &[u8]) -> Result<&[u8], i32> {
 
     let major = resp_buf[19] >> 5;
     let addl = resp_buf[19] & 0x1f;
-    if major != 2 {
-        return Err(NONA_ERR_NSM_IOCTL_FAILED);
-    }
-
-    let (bstr_len, payload_offset) = if addl < 24 {
+    let (item_count, mut cursor) = if addl < 24 {
         (addl as usize, 20usize)
     } else if addl == 24 {
         (resp_buf[20] as usize, 21usize)
@@ -226,15 +223,81 @@ pub fn parse_nsm_get_random_response(resp_buf: &[u8]) -> Result<&[u8], i32> {
         }
         let len = u16::from_be_bytes([resp_buf[20], resp_buf[21]]) as usize;
         (len, 22usize)
+    } else if addl == 26 {
+        if resp_buf.len() < 24 {
+            return Err(NONA_ERR_NSM_IOCTL_FAILED);
+        }
+        let len = u32::from_be_bytes([resp_buf[20], resp_buf[21], resp_buf[22], resp_buf[23]]) as usize;
+        (len, 24usize)
     } else {
         return Err(NONA_ERR_NSM_IOCTL_FAILED);
     };
 
-    if bstr_len == 0 || payload_offset.saturating_add(bstr_len) != resp_buf.len() {
+    if item_count == 0 {
         return Err(NONA_ERR_NSM_IOCTL_FAILED);
     }
 
-    Ok(&resp_buf[payload_offset..payload_offset + bstr_len])
+    if major == 2 {
+        if cursor.saturating_add(item_count) != resp_buf.len() {
+            return Err(NONA_ERR_NSM_IOCTL_FAILED);
+        }
+        let copy_len = core::cmp::min(item_count, out.len());
+        out[..copy_len].copy_from_slice(&resp_buf[cursor..cursor + copy_len]);
+        Ok(item_count)
+    } else if major == 4 {
+        let mut written = 0usize;
+        for _ in 0..item_count {
+            if cursor >= resp_buf.len() {
+                return Err(NONA_ERR_NSM_IOCTL_FAILED);
+            }
+            let hdr = resp_buf[cursor];
+            let elem_major = hdr >> 5;
+            let elem_addl = hdr & 0x1f;
+            if elem_major != 0 {
+                return Err(NONA_ERR_NSM_IOCTL_FAILED);
+            }
+            let val = match elem_addl {
+                0..=23 => {
+                    cursor += 1;
+                    elem_addl
+                }
+                24 => {
+                    if cursor + 1 >= resp_buf.len() {
+                        return Err(NONA_ERR_NSM_IOCTL_FAILED);
+                    }
+                    let v = resp_buf[cursor + 1];
+                    cursor += 2;
+                    v
+                }
+                _ => return Err(NONA_ERR_NSM_IOCTL_FAILED),
+            };
+            if written < out.len() {
+                out[written] = val;
+                written += 1;
+            }
+        }
+        if cursor != resp_buf.len() {
+            return Err(NONA_ERR_NSM_IOCTL_FAILED);
+        }
+        Ok(item_count)
+    } else {
+        Err(NONA_ERR_NSM_IOCTL_FAILED)
+    }
+}
+
+pub fn parse_nsm_get_random_response(resp_buf: &[u8]) -> Result<&[u8], i32> {
+    let mut dummy = [0u8; 256];
+    let _ = parse_nsm_get_random_response_into(resp_buf, &mut dummy)?;
+    if (resp_buf[19] >> 5) != 2 {
+        return Err(NONA_ERR_NSM_IOCTL_FAILED);
+    }
+    let addl = resp_buf[19] & 0x1f;
+    let (len, off) = match addl {
+        0..=23 => (addl as usize, 20),
+        24 => (resp_buf[20] as usize, 21),
+        _ => return Err(NONA_ERR_NSM_IOCTL_FAILED),
+    };
+    Ok(&resp_buf[off..off + len])
 }
 
 /// Queries `/dev/nsm` directly via `NSM_IOCTL_RAW` (`0xC0200A00`) for hardware random bytes.
@@ -260,8 +323,8 @@ pub unsafe fn query_hardware_random(out: &mut [u8]) -> i32 {
         }
     };
 
-    // NSM GetRandom returns up to 256 random bytes wrapped in a 22-byte CBOR header.
-    let mut resp_raw = [0u8; 320];
+    // NSM GetRandom returns 256-1024 random bytes wrapped in a 22-byte CBOR header.
+    let mut resp_raw = [0u8; 2048];
     let mut raw_msg = NsmRawMessage {
         request: NsmIovec {
             addr: req_raw.as_ptr() as u64,
@@ -273,7 +336,10 @@ pub unsafe fn query_hardware_random(out: &mut [u8]) -> i32 {
         },
     };
 
-    let ret = libc::ioctl(fd, NSM_IOCTL_RAW as _, &raw mut raw_msg);
+    let mut ret = libc::ioctl(fd, NSM_IOCTL_RAW as _, &raw mut raw_msg);
+    if ret < 0 {
+        ret = libc::ioctl(fd, NSM_IOCTL_RAW_AL2 as _, &raw mut raw_msg);
+    }
     libc::close(fd);
     ct_zeroize(&mut req_raw);
 
@@ -288,21 +354,20 @@ pub unsafe fn query_hardware_random(out: &mut [u8]) -> i32 {
         return NONA_ERR_ATTEST_OVERFLOW;
     }
 
-    let random_bytes = match parse_nsm_get_random_response(&resp_raw[..resp_len]) {
-        Ok(bytes) => bytes,
+    let avail_bytes = match parse_nsm_get_random_response_into(&resp_raw[..resp_len], out) {
+        Ok(n) => n,
         Err(err) => {
             ct_zeroize(&mut resp_raw);
+            ct_zeroize(out);
             return err;
         }
     };
+    ct_zeroize(&mut resp_raw);
 
-    if random_bytes.len() < out.len() {
-        ct_zeroize(&mut resp_raw);
+    if avail_bytes < out.len() {
+        ct_zeroize(out);
         return NONA_ERR_NSM_IOCTL_FAILED;
     }
-
-    out.copy_from_slice(&random_bytes[..out.len()]);
-    ct_zeroize(&mut resp_raw);
 
     // Reject degenerate all-zero entropy block
     let mut acc: u8 = 0;
@@ -387,7 +452,10 @@ pub unsafe fn query_hardware_attestation_with_nonce(
         },
     };
 
-    let ret = libc::ioctl(fd, NSM_IOCTL_RAW as _, &raw mut raw_msg);
+    let mut ret = libc::ioctl(fd, NSM_IOCTL_RAW as _, &raw mut raw_msg);
+    if ret < 0 {
+        ret = libc::ioctl(fd, NSM_IOCTL_RAW_AL2 as _, &raw mut raw_msg);
+    }
     libc::close(fd);
     ct_zeroize(&mut req_raw);
 

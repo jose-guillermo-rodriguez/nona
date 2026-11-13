@@ -82,32 +82,45 @@ if [ "$TARGET_ARCH" != "$HOST_ARCH" ] && [ "$FORCE_CROSS" -ne 1 ]; then
     exit 1
 fi
 
-# 3. Resolve Podman binary dynamically
-PODMAN_BIN="${PODMAN_BIN:-}"
-if [ -z "$PODMAN_BIN" ] || ! command -v "$PODMAN_BIN" &>/dev/null; then
-    if command -v podman &>/dev/null; then
-        PODMAN_BIN="$(command -v podman)"
+# 3. Resolve Container Runtime dynamically (Docker preferred on AWS Nitro EC2, Docker/Podman supported)
+CONTAINER_BIN="${CONTAINER_BIN:-${PODMAN_BIN:-}}"
+if [ -z "$CONTAINER_BIN" ] || ! command -v "$CONTAINER_BIN" &>/dev/null; then
+    if command -v nitro-cli &>/dev/null && command -v docker &>/dev/null; then
+        CONTAINER_BIN="$(command -v docker)"
+    elif command -v docker &>/dev/null; then
+        CONTAINER_BIN="$(command -v docker)"
+    elif command -v podman &>/dev/null; then
+        CONTAINER_BIN="$(command -v podman)"
     elif [ -x "${NONA_ROOT}/.bin/podman" ]; then
-        PODMAN_BIN="${NONA_ROOT}/.bin/podman"
+        CONTAINER_BIN="${NONA_ROOT}/.bin/podman"
     elif [ -x "${NONA_ROOT}/../.bin/podman" ]; then
-        PODMAN_BIN="${NONA_ROOT}/../.bin/podman"
+        CONTAINER_BIN="${NONA_ROOT}/../.bin/podman"
     elif [ -x "${NONA_ROOT}/.runtime/bin/podman" ]; then
-        PODMAN_BIN="${NONA_ROOT}/.runtime/bin/podman"
+        CONTAINER_BIN="${NONA_ROOT}/.runtime/bin/podman"
     else
-        echo "[ERROR] Podman binary not found in PATH or runtime paths" >&2
+        echo "[ERROR] Container engine not found in PATH or runtime paths (docker or podman required)" >&2
         exit 1
     fi
 fi
 
-# 4. Resolve cgroup manager for rootless container execution (WSL2 fallback)
-PODMAN_CGROUP_OPTS=()
-if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -ne 0 ] && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ]; then
-    echo "[INFO] Inactive systemd user session bus detected. Enforcing --cgroup-manager=cgroupfs"
-    PODMAN_CGROUP_OPTS+=("--cgroup-manager=cgroupfs")
+IS_PODMAN=0
+if [[ "$(basename "$CONTAINER_BIN")" == *podman* ]]; then
+    IS_PODMAN=1
 fi
 
+# 4. Resolve cgroup manager and deterministic build flags per container runtime
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 export SOURCE_DATE_EPOCH
+
+PODMAN_CGROUP_OPTS=()
+BUILD_REPRO_OPTS=()
+if [ "$IS_PODMAN" -eq 1 ]; then
+    BUILD_REPRO_OPTS+=("--source-date-epoch" "$SOURCE_DATE_EPOCH" "--rewrite-timestamp")
+    if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -ne 0 ] && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ]; then
+        echo "[INFO] Inactive systemd user session bus detected. Enforcing --cgroup-manager=cgroupfs"
+        PODMAN_CGROUP_OPTS+=("--cgroup-manager=cgroupfs")
+    fi
+fi
 
 IMAGE_TAG="localhost/nona-enclave:${TARGET_ARCH}-v2.0.0"
 STATIC_BIN_OUTPUT="${OUTPUT_DIR}/nona_enclave_musl_${TARGET_ARCH}"
@@ -125,18 +138,17 @@ echo "===================================================================="
 
 # 4. Build Hermetic Enclave Container Image
 # Pre-flight container daemon connectivity check
-if ! "$PODMAN_BIN" info >/dev/null 2>&1; then
-    echo "[ERROR] Container engine ($PODMAN_BIN) is unreachable or not running." >&2
-    echo "Ensure the container daemon / VM is active (e.g., `podman machine start`)." >&2
+if ! "$CONTAINER_BIN" info >/dev/null 2>&1; then
+    echo "[ERROR] Container engine ($CONTAINER_BIN) is unreachable or not running." >&2
+    echo "Ensure the container daemon / VM is active (e.g., systemctl start docker or podman machine start)." >&2
     exit 1
 fi
 
-echo "[1/4] Building hermetic enclave container image (${IMAGE_TAG})..."
-"$PODMAN_BIN" build \
+echo "[1/4] Building hermetic enclave container image (${IMAGE_TAG}) via $(basename "$CONTAINER_BIN")..."
+"$CONTAINER_BIN" build \
     --no-cache \
     --platform "$CONTAINER_PLATFORM" \
-    --source-date-epoch "$SOURCE_DATE_EPOCH" \
-    --rewrite-timestamp \
+    ${BUILD_REPRO_OPTS[@]+"${BUILD_REPRO_OPTS[@]}"} \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
     --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
@@ -146,12 +158,12 @@ echo "[1/4] Building hermetic enclave container image (${IMAGE_TAG})..."
 
 # 5. Extract static binary to verify linkage and footprint
 echo "[2/4] Verifying binary artifacts and memory footprint ceiling..."
-CONTAINER_ID="$("$PODMAN_BIN" create ${PODMAN_CGROUP_OPTS[@]+"${PODMAN_CGROUP_OPTS[@]}"} --platform "$CONTAINER_PLATFORM" "$IMAGE_TAG")"
-trap '"$PODMAN_BIN" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true' EXIT
+CONTAINER_ID="$("$CONTAINER_BIN" create ${PODMAN_CGROUP_OPTS[@]+"${PODMAN_CGROUP_OPTS[@]}"} --platform "$CONTAINER_PLATFORM" "$IMAGE_TAG")"
+trap '"$CONTAINER_BIN" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true' EXIT
 
-"$PODMAN_BIN" cp "${CONTAINER_ID}:/bin/nona_enclave" "$STATIC_BIN_OUTPUT"
+"$CONTAINER_BIN" cp "${CONTAINER_ID}:/bin/nona_enclave" "$STATIC_BIN_OUTPUT"
 cp -f "$STATIC_BIN_OUTPUT" "${OUTPUT_DIR}/nona_enclave_musl"
-"$PODMAN_BIN" rm -f "$CONTAINER_ID" >/dev/null
+"$CONTAINER_BIN" rm -f "$CONTAINER_ID" >/dev/null
 trap - EXIT
 
 BIN_SIZE_BYTES=$(wc -c < "$STATIC_BIN_OUTPUT" | tr -d ' ')
@@ -173,7 +185,7 @@ if command -v nitro-cli &>/dev/null; then
         --output-file "$EIF_OUTPUT")
     echo "[+] Generated production EIF via host nitro-cli: $EIF_OUTPUT"
 else
-    rm -f "$EIF_OUTPUT" && "$PODMAN_BIN" save "$IMAGE_TAG" -o "$EIF_OUTPUT"
+    rm -f "$EIF_OUTPUT" && "$CONTAINER_BIN" save "$IMAGE_TAG" -o "$EIF_OUTPUT"
     echo "[+] Saved hermetic enclave image package: $EIF_OUTPUT"
 fi
 cp -f "$EIF_OUTPUT" "${OUTPUT_DIR}/nona_enclave.eif"

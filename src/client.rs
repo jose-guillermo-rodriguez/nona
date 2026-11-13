@@ -594,44 +594,142 @@ impl NonaClient {
         Ok(())
     }
 
-    #[inline(never)]
-    fn peel_outer_attestation_doc<'a>(
-        root: &'a CborValue<'a>,
-    ) -> Result<Option<CborValue<'a>>, ClientError> {
-        if let CborValue::Map(entries) = root {
-            let mut inner_doc_bytes: Option<&[u8]> = None;
-            for (k, v) in entries {
-                if let CborValue::Text("Attestation") = k {
-                    if let CborValue::Map(inner_entries) = v {
-                        for (ik, iv) in inner_entries {
-                            if let CborValue::Text("document") = ik {
-                                if let CborValue::Bytes(b) = iv {
-                                    inner_doc_bytes = Some(b);
-                                    break;
-                                }
-                            }
-                        }
-                    } else if let CborValue::Bytes(b) = v {
-                        inner_doc_bytes = Some(b);
-                        break;
-                    }
-                } else if let CborValue::Text("document") = k {
-                    if let CborValue::Bytes(b) = v {
-                        inner_doc_bytes = Some(b);
-                        break;
-                    }
-                }
-            }
-            if let Some(doc_slice) = inner_doc_bytes {
-                let mut unpeeled_parser = CborParser::new(doc_slice);
-                let val = unpeeled_parser.parse_value()?;
-                if !unpeeled_parser.is_eof() {
+    fn read_cbor_head_raw(buf: &[u8], cursor: &mut usize) -> Result<(u8, u64), ClientError> {
+        if *cursor >= buf.len() {
+            return Err(ClientError::CborParseError);
+        }
+        let b = buf[*cursor];
+        *cursor += 1;
+        let major = b >> 5;
+        let info = b & 0x1f;
+        let val = match info {
+            0..=23 => info as u64,
+            24 => {
+                if *cursor >= buf.len() {
                     return Err(ClientError::CborParseError);
                 }
-                return Ok(Some(val));
+                let v = buf[*cursor] as u64;
+                *cursor += 1;
+                v
             }
+            25 => {
+                if cursor.checked_add(2).is_none_or(|e| e > buf.len()) {
+                    return Err(ClientError::CborParseError);
+                }
+                let v = u16::from_be_bytes([buf[*cursor], buf[*cursor + 1]]) as u64;
+                *cursor += 2;
+                v
+            }
+            26 => {
+                if cursor.checked_add(4).is_none_or(|e| e > buf.len()) {
+                    return Err(ClientError::CborParseError);
+                }
+                let v = u32::from_be_bytes([
+                    buf[*cursor],
+                    buf[*cursor + 1],
+                    buf[*cursor + 2],
+                    buf[*cursor + 3],
+                ]) as u64;
+                *cursor += 4;
+                v
+            }
+            _ => return Err(ClientError::CborParseError),
+        };
+        Ok((major, val))
+    }
+
+    fn decode_cbor_bytes_or_u8_array<'a>(
+        buf: &'a [u8],
+        cursor: &mut usize,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, ClientError> {
+        let (major, count_u64) = Self::read_cbor_head_raw(buf, cursor)?;
+        let count = usize::try_from(count_u64).map_err(|_| ClientError::CborParseError)?;
+        if count == 0 || count > crate::attestation::ATTESTATION_MAX_DOC_SIZE {
+            return Err(ClientError::CborParseError);
         }
-        Ok(None)
+        match major {
+            2 => {
+                if cursor.checked_add(count).is_none_or(|e| e > buf.len()) {
+                    return Err(ClientError::CborParseError);
+                }
+                let slice = &buf[*cursor..*cursor + count];
+                *cursor += count;
+                Ok(std::borrow::Cow::Borrowed(slice))
+            }
+            4 => {
+                let mut out = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (elem_major, elem_val) = Self::read_cbor_head_raw(buf, cursor)?;
+                    if elem_major != 0 {
+                        return Err(ClientError::CborParseError);
+                    }
+                    let byte = u8::try_from(elem_val).map_err(|_| ClientError::CborParseError)?;
+                    out.push(byte);
+                }
+                Ok(std::borrow::Cow::Owned(out))
+            }
+            _ => Err(ClientError::CborParseError),
+        }
+    }
+
+    /// Unwraps the outer `/dev/nsm` CBOR response map (`{"Attestation": {"document": ...}}`)
+    /// into raw COSE_Sign1 bytes, supporting both CBOR byte strings (major 2) and
+    /// `aws-nitro-enclaves-nsm-api` integer arrays (`[u8; N]`, major 4).
+    #[inline(never)]
+    fn peel_outer_nsm_envelope<'a>(
+        doc_bytes: &'a [u8],
+    ) -> Result<std::borrow::Cow<'a, [u8]>, ClientError> {
+        if doc_bytes.is_empty() || (doc_bytes[0] >> 5) != 5 {
+            return Ok(std::borrow::Cow::Borrowed(doc_bytes));
+        }
+        let mut cursor = 0usize;
+        let (_, outer_pairs) = Self::read_cbor_head_raw(doc_bytes, &mut cursor)?;
+        if outer_pairs != 1 {
+            return Err(ClientError::CborParseError);
+        }
+        let (k_major, k_len_u64) = Self::read_cbor_head_raw(doc_bytes, &mut cursor)?;
+        let k_len = usize::try_from(k_len_u64).map_err(|_| ClientError::CborParseError)?;
+        if k_major != 3 || cursor.checked_add(k_len).is_none_or(|e| e > doc_bytes.len()) {
+            return Err(ClientError::CborParseError);
+        }
+        let key_str = core::str::from_utf8(&doc_bytes[cursor..cursor + k_len])
+            .map_err(|_| ClientError::CborParseError)?;
+        cursor += k_len;
+
+        let peeled = match key_str {
+            "Attestation" => {
+                if cursor < doc_bytes.len() && (doc_bytes[cursor] >> 5) == 5 {
+                    let (_, inner_pairs) = Self::read_cbor_head_raw(doc_bytes, &mut cursor)?;
+                    if inner_pairs != 1 {
+                        return Err(ClientError::CborParseError);
+                    }
+                    let (ik_major, ik_len_u64) = Self::read_cbor_head_raw(doc_bytes, &mut cursor)?;
+                    let ik_len =
+                        usize::try_from(ik_len_u64).map_err(|_| ClientError::CborParseError)?;
+                    if ik_major != 3
+                        || cursor.checked_add(ik_len).is_none_or(|e| e > doc_bytes.len())
+                    {
+                        return Err(ClientError::CborParseError);
+                    }
+                    let ik_str = core::str::from_utf8(&doc_bytes[cursor..cursor + ik_len])
+                        .map_err(|_| ClientError::CborParseError)?;
+                    cursor += ik_len;
+                    if ik_str != "document" {
+                        return Err(ClientError::CborParseError);
+                    }
+                    Self::decode_cbor_bytes_or_u8_array(doc_bytes, &mut cursor)?
+                } else {
+                    Self::decode_cbor_bytes_or_u8_array(doc_bytes, &mut cursor)?
+                }
+            }
+            "document" => Self::decode_cbor_bytes_or_u8_array(doc_bytes, &mut cursor)?,
+            _ => return Err(ClientError::CborParseError),
+        };
+
+        if cursor != doc_bytes.len() {
+            return Err(ClientError::CborParseError);
+        }
+        Ok(peeled)
     }
 
     fn verify_cose_protected_headers(protected_bytes: &[u8]) -> Result<(), ClientError> {
@@ -1055,13 +1153,12 @@ impl NonaClient {
             return Err(ClientError::CborParseError);
         }
 
-        let mut parser = CborParser::new(doc_bytes);
-        let root = parser.parse_value()?;
+        let effective_doc_bytes = Self::peel_outer_nsm_envelope(doc_bytes)?;
+        let mut parser = CborParser::new(&effective_doc_bytes);
+        let effective_root = &parser.parse_value()?;
         if !parser.is_eof() {
             return Err(ClientError::CborParseError);
         }
-        let unpeeled_holder = Self::peel_outer_attestation_doc(&root)?;
-        let effective_root = unpeeled_holder.as_ref().unwrap_or(&root);
 
         let cose_array = match effective_root {
             CborValue::Tag(18, inner) => match inner.as_ref() {
