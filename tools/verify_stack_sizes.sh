@@ -40,12 +40,16 @@ if [ "${1:-}" != "--inside-container" ]; then
 
         HOST_RAW="$(uname -m)"
         case "$HOST_RAW" in
-            arm64|aarch64) CONTAINER_PLATFORM="linux/arm64" ;;
-            x86_64|amd64)  CONTAINER_PLATFORM="linux/amd64" ;;
+            arm64|aarch64)
+                CONTAINER_PLATFORM="linux/arm64"
+                MUSL_IMAGE="docker.io/clux/muslrust@sha256:0e24d3040bc42ade7eebb53832e4d88d74dc4a0f015ba744c3a41c26a8e1e8d9"
+                ;;
+            x86_64|amd64)
+                CONTAINER_PLATFORM="linux/amd64"
+                MUSL_IMAGE="docker.io/clux/muslrust@sha256:500d50571f9f83d467481cbaf58cab6d711700047d0e69b73a1caadc23358abd"
+                ;;
             *) echo "[ERROR] Unsupported host architecture: $HOST_RAW" >&2; exit 1 ;;
         esac
-
-        MUSL_IMAGE="docker.io/clux/muslrust:latest"
 
         # Resolve cargo cache directory if present
         CARGO_MOUNT=()
@@ -71,7 +75,12 @@ fi
 
 # 2. Inside Container / Native Linux: Toolchain & Inspector Initialization
 echo "=== 1. Toolchain & Inspector Resolution ==="
-rustup target add aarch64-unknown-linux-musl --toolchain nightly >/dev/null 2>&1 || true
+case "$(uname -m)" in
+    aarch64|arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;;
+    x86_64|amd64)  MUSL_TARGET="x86_64-unknown-linux-musl" ;;
+    *) echo "[ERROR] Unsupported container architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+rustup target add "$MUSL_TARGET" --toolchain nightly >/dev/null 2>&1 || true
 rustup component add llvm-tools-preview --toolchain nightly >/dev/null 2>&1
 
 SYSROOT="$(rustc --print sysroot 2>/dev/null || true)"
@@ -93,13 +102,13 @@ echo "[+] Stack Inspector (readelf): $READELF"
 echo "[+] Active compiler: $(rustc --version)"
 
 export CARGO_TARGET_DIR=/tmp/target
-TARGET_DIR="/tmp/target/aarch64-unknown-linux-musl/release"
+TARGET_DIR="/tmp/target/${MUSL_TARGET}/release"
 
 # 3. Compile Static Library with Stack Sizes Emitted
 echo ""
-echo "=== 2. Compiling Static Library (libnona_core.a) with -Z emit-stack-sizes ==="
+echo "=== 2. Compiling Static Library (libnona_core.a) for ${MUSL_TARGET} with -Z emit-stack-sizes ==="
 RUSTFLAGS="-C link-arg=-lc -C target-feature=+crt-static -Z emit-stack-sizes" \
-    cargo rustc --release --no-default-features --target aarch64-unknown-linux-musl --lib --crate-type staticlib
+    cargo rustc --release --no-default-features --target "$MUSL_TARGET" --lib --crate-type staticlib
 
 # 4. Audit libnona_core.a Machine Stack Frames
 echo ""

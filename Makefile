@@ -53,22 +53,8 @@ lint:
 	./tools/check_code_hygiene.sh
 
 formal:
-	@echo "[HOST] Running Verus SMT formal verification proofs..."
-	@if ./tools/run_verus_safe.sh --check-env >/dev/null 2>&1; then \
-		./tools/run_verus_safe.sh; \
-	elif [ -f "proofs/verus_verification.log" ]; then \
-		echo "[NOTICE] Verus binary not found on host. Validating pre-certified proof log (146/146 theorems)..."; \
-		if grep -Fq "146/146 SMT TARGETS SEALED (0 ERRORS)" proofs/verus_verification.log; then \
-			echo "[✓] 146 SMT proofs confirmed valid in proofs/verus_verification.log."; \
-			echo "[HINT] To execute live SMT solver locally, install Verus into ~/.verus or set NONA_RUNTIME_DIR."; \
-		else \
-			echo "[ERROR] Proof log failed integrity check: 146/146 SMT seal mismatch or errors detected." >&2; \
-			exit 1; \
-		fi; \
-	else \
-		echo "[ERROR] Neither Verus binary nor proofs/verus_verification.log available. Verification halted." >&2; \
-		exit 1; \
-	fi
+	@echo "[HOST] Running live Verus SMT formal verification proofs (fail-closed)..."
+	@./tools/run_verus_safe.sh
 
 gates:
 	@echo "[HOST] Executing mechanical runtime gates 1-5..."

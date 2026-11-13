@@ -291,7 +291,7 @@ The engine exposes decoupled, zero-heap C-ABI entry points governing the two-par
    - **Failure Modes:** Fails immediately with constant-time memory zeroization ($H(R) = 0$) and returns `NONA_ERR_INVALID_CURVE_POINT` (-13) if any coordinate is $\ge p$ or fails the curve equation.
 3. **`nona_phase2_intersect`**:
    - **Signature:** `int32_t nona_phase2_intersect(const uint8_t* blinded_a, size_t len_a, const uint8_t* blinded_b, size_t len_b, size_t n_elements, uint8_t* match_indices_out, size_t out_capacity, uint32_t flags, uint64_t* cardinality_out)`
-   - **Semantics:** Evaluates point equality between re-blinded sets $A'_j$ and $B'_i$. Supports full intersection with Feistel index obfuscation (`NONA_FLAG_FULL_PSI`) and cardinality mode with discrete Laplace noise injection (`NONA_FLAG_PSI_CA`).
+   - **Semantics:** Evaluates constant-time point equality between re-blinded sets $A'_j$ and $B'_i$. Under `NONA_FLAG_FULL_PSI`, emits matching 32-bit little-endian element indices into `match_indices_out` (with optional format-preserving Feistel index permutation via `nona_permute_index`, FR-09-IDXOBFC); under `NONA_FLAG_PSI_CA`, zeroes `match_indices_out` ($H(M)=0$) and emits a Discrete Laplace noised cardinality.
 
 ---
 

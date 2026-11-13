@@ -161,11 +161,56 @@ int main(void) {
 
     assert(p2_rc == 0);
     assert(calculated_cardinality == expected_cardinality);
+    for (uint32_t m = 0; m < (uint32_t)expected_cardinality; m++) {
+        uint32_t emitted_idx = 999;
+        memcpy(&emitted_idx, match_indices_out + (m * 4), 4);
+        assert(emitted_idx == m);
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 4b: Test PSI-PR Payload Retrieval & PSI-SUM Accumulation
+    // ------------------------------------------------------------------------
+    uint64_t raw_payloads_b[4] NONA_ALIGN(64) = {100, 250, 50, 9999};
+    uint64_t payloads_b[4] NONA_ALIGN(64) = {0};
+    for (size_t j = 0; j < count_b; j++) {
+        uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        const uint8_t* tok = blind_b_r2 + (j * 32);
+        memcpy(&w0, tok + 0, 8);
+        memcpy(&w1, tok + 8, 8);
+        memcpy(&w2, tok + 16, 8);
+        memcpy(&w3, tok + 24, 8);
+        uint64_t kappa = w0 ^ w1 ^ w2 ^ w3;
+        payloads_b[j] = raw_payloads_b[j] ^ kappa;
+    }
+    uint64_t payloads_out[4] NONA_ALIGN(64) = {0};
+    uint8_t pr_indices_out[128] NONA_ALIGN(64) = {0};
+    uint64_t pr_cardinality NONA_ALIGN(64) = 0;
+    uint64_t pr_sum NONA_ALIGN(64) = 0;
+    int32_t pr_rc = nona_phase2_intersect_payload(
+        blind_a_r2, buf_len_a,
+        blind_b_r2, buf_len_b,
+        payloads_b,
+        count_a,
+        pr_indices_out,
+        payloads_out,
+        buf_len_a,
+        NONA_FLAG_PSI_PR | NONA_FLAG_PSI_SUM,
+        &pr_cardinality,
+        &pr_sum
+    );
+    assert(pr_rc == 0);
+    assert(pr_cardinality == 3);
+    assert(payloads_out[0] == 100);
+    assert(payloads_out[1] == 250);
+    assert(payloads_out[2] == 50);
+    assert(payloads_out[3] == 0);
+    assert(pr_sum == 400);
 
     // ------------------------------------------------------------------------
     // Step 5: Test Cardinality-Only Mode (NONA_FLAG_PSI_CA = 1)
     // ------------------------------------------------------------------------
     uint64_t ca_cardinality NONA_ALIGN(64) = 0;
+    memset(match_indices_out, 0xCC, sizeof(match_indices_out));
     if (access("/dev/nsm", R_OK | W_OK) == 0) {
         int32_t ca_rc = nona_phase2_intersect(
             blind_a_r2, buf_len_a,
@@ -177,6 +222,9 @@ int main(void) {
         );
         assert(ca_rc == 0);
         assert(ca_cardinality <= count_a);
+        for (size_t z = 0; z < sizeof(match_indices_out); z++) {
+            assert(match_indices_out[z] == 0x00);
+        }
     } else {
         pid_t pid = fork();
         assert(pid >= 0);

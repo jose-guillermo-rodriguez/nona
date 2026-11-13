@@ -115,14 +115,19 @@ int main(void) {
         int32_t r2_b = nona_phase2_reblind(blind_b_r1, len, count, key_a, blind_b_r2, len);
         assert(r2_a == 0 && r2_b == 0);
 
-        // Phase 2 Intersect
+        // Phase 2 Intersect (NONA_FLAG_FULL_PSI = 0 -> exact deterministic cardinality & indices)
+        memset(buf_out, 0xFF, sizeof(buf_out));
         int32_t p2_rc = nona_phase2_intersect(
-            blind_a_r2, len, blind_b_r2, len, count, buf_out, len, 0, &card
+            blind_a_r2, len, blind_b_r2, len, count, buf_out, len, NONA_FLAG_FULL_PSI, &card
         );
         assert(p2_rc == 0);
-        // FR-22: Under Cardinality Mode, DP noise is injected and clamped to [0, count]
-        assert(card <= count);
-        printf("  [+] Subtest 2 Passed: Identity sets yielded exactly %llu matches.\n", (unsigned long long)count);
+        assert(card == count);
+        for (uint32_t idx = 0; idx < (uint32_t)count; idx++) {
+            uint32_t emitted = 0;
+            memcpy(&emitted, buf_out + (idx * 4), 4);
+            assert(emitted == idx);
+        }
+        printf("  [+] Subtest 2 Passed: Identity sets yielded exact cardinality %llu and indices [0..3].\n", (unsigned long long)count);
     }
 
     // ------------------------------------------------------------------------

@@ -210,7 +210,6 @@ fn test_real_dual_transport_client_and_tail_padding() {
         "Unattested channel must fail closed on ingest_chunk"
     );
     client.allow_simulation_fallback = true;
-    client.allow_simulation_fallback = true;
 
     // 1. Ping roundtrip
     let echo = client.ping(b"RADICAL_EFFICACY_2026").expect("Ping failed");
