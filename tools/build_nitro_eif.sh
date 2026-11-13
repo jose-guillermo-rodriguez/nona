@@ -115,7 +115,15 @@ export SOURCE_DATE_EPOCH
 PODMAN_CGROUP_OPTS=()
 BUILD_REPRO_OPTS=()
 if [ "$IS_PODMAN" -eq 1 ]; then
-    BUILD_REPRO_OPTS+=("--source-date-epoch" "$SOURCE_DATE_EPOCH" "--rewrite-timestamp")
+    BUILD_HELP="$("$CONTAINER_BIN" build --help 2>&1 || true)"
+    if grep -q -- '--source-date-epoch' <<<"$BUILD_HELP"; then
+        BUILD_REPRO_OPTS+=("--source-date-epoch" "$SOURCE_DATE_EPOCH")
+    elif grep -q -- '--timestamp' <<<"$BUILD_HELP"; then
+        BUILD_REPRO_OPTS+=("--timestamp" "$SOURCE_DATE_EPOCH")
+    fi
+    if grep -q -- '--rewrite-timestamp' <<<"$BUILD_HELP"; then
+        BUILD_REPRO_OPTS+=("--rewrite-timestamp")
+    fi
     if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -ne 0 ] && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ]; then
         echo "[INFO] Inactive systemd user session bus detected. Enforcing --cgroup-manager=cgroupfs"
         PODMAN_CGROUP_OPTS+=("--cgroup-manager=cgroupfs")
