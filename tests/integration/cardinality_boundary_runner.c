@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "nona.h"
 
 int main(void) {
@@ -113,14 +115,19 @@ int main(void) {
         int32_t r2_b = nona_phase2_reblind(blind_b_r1, len, count, key_a, blind_b_r2, len);
         assert(r2_a == 0 && r2_b == 0);
 
-        // Phase 2 Intersect
+        // Phase 2 Intersect (NONA_FLAG_FULL_PSI = 0 -> exact deterministic cardinality & indices)
+        memset(buf_out, 0xFF, sizeof(buf_out));
         int32_t p2_rc = nona_phase2_intersect(
-            blind_a_r2, len, blind_b_r2, len, count, buf_out, len, 0, &card
+            blind_a_r2, len, blind_b_r2, len, count, buf_out, len, NONA_FLAG_FULL_PSI, &card
         );
         assert(p2_rc == 0);
-        // FR-22: Under Cardinality Mode, DP noise is injected and clamped to [0, count]
-        assert(card <= count);
-        printf("  [+] Subtest 2 Passed: Identity sets yielded exactly %llu matches.\n", (unsigned long long)count);
+        assert(card == count);
+        for (uint32_t idx = 0; idx < (uint32_t)count; idx++) {
+            uint32_t emitted = 0;
+            memcpy(&emitted, buf_out + (idx * 4), 4);
+            assert(emitted == idx);
+        }
+        printf("  [+] Subtest 2 Passed: Identity sets yielded exact cardinality %llu and indices [0..3].\n", (unsigned long long)count);
     }
 
     // ------------------------------------------------------------------------
@@ -214,19 +221,31 @@ int main(void) {
 
         memset(match_indices, 0xEE, sizeof(match_indices));
 
-        int32_t rc = nona_phase2_intersect(
-            blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
-        );
-        assert(rc == 0);
-        // FR-22: Under Cardinality Mode, DP noise is injected and clamped to [0, count]
-        assert(card <= count);
-
-        // Verify index array suppression: 100% of bytes must be zeroed (H(M) = 0)
-        for (size_t i = 0; i < sizeof(match_indices); i++) {
-            assert(match_indices[i] == 0x00);
+        if (access("/dev/nsm", R_OK | W_OK) == 0) {
+            int32_t rc = nona_phase2_intersect(
+                blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
+            );
+            assert(rc == 0);
+            assert(card <= count);
+            for (size_t i = 0; i < sizeof(match_indices); i++) {
+                assert(match_indices[i] == 0x00);
+            }
+            printf("  [+] Subtest 4 Passed: Cardinality = %llu computed with verified index suppression (H(M)=0).\n",
+                   (unsigned long long)card);
+        } else {
+            pid_t pid = fork();
+            assert(pid >= 0);
+            if (pid == 0) {
+                (void)nona_phase2_intersect(
+                    blind_a_r2, len, blind_b_r2, len, count, match_indices, len, NONA_FLAG_PSI_CA, &card
+                );
+                _exit(0);
+            }
+            int wstatus = 0;
+            assert(waitpid(pid, &wstatus, 0) == pid);
+            assert(WIFSIGNALED(wstatus) || (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) != 0));
+            printf("  [+] Subtest 4 Passed: Fail-closed abort verified for NONA_FLAG_PSI_CA without /dev/nsm.\n");
         }
-        printf("  [+] Subtest 4 Passed: Cardinality = %llu computed with verified index suppression (H(M)=0).\n",
-               (unsigned long long)card);
     }
 
     nona_ct_zeroize(key_a, sizeof(key_a));

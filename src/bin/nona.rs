@@ -1,6 +1,4 @@
-// ============================================================================
-// BINARY: nona - Ergonomic Developer CLI & POSIX Streaming Interlock
-// ============================================================================
+//! Developer CLI and POSIX streaming interlock entrypoint.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -546,8 +544,30 @@ fn normalize_records(raw_records: &[String]) -> (Vec<[u8; 32]>, Vec<usize>) {
 }
 
 #[cfg(feature = "std")]
+fn nitro_hardware_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/sys/module/nitro_enclaves").exists()
+            || match std::fs::symlink_metadata("/dev/nitro_enclaves") {
+                Ok(_) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+            }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 fn connect_raw(config: &CliConfig) -> Result<NonaClient, (String, i32)> {
-    let mut client = if let Some(port) = config.vsock_port {
+    let effective_vsock_port = config.vsock_port.or_else(|| {
+        if !config.dev_simulation && nitro_hardware_present() {
+            Some(nona_core::client::DEFAULT_VSOCK_PORT)
+        } else {
+            None
+        }
+    });
+    let mut client = if let Some(port) = effective_vsock_port {
         NonaClient::connect_vsock(port)
             .map_err(|e| (format!("Failed to connect to VSOCK port {port}: {e:?}"), 1))?
     } else {
@@ -712,9 +732,13 @@ fn run_match(config: &CliConfig) -> Result<(), (String, i32)> {
     }
 
     let mut client = connect_client(config)?;
-    let blinded_local = client
-        .blind_stream_chunked(&stream_payload)
-        .map_err(|e| (format!("Phase 1 blinding stream failed: {e:?}"), 1))?;
+    let blinded_local = if config.dev_simulation {
+        let sim_key = [0x42u8; 32];
+        client.blind_stream_chunked_with_key(&sim_key, &stream_payload)
+    } else {
+        client.blind_stream_chunked(&stream_payload)
+    }
+    .map_err(|e| (format!("Phase 1 blinding stream failed: {e:?}"), 1))?;
 
     let flags = if config.cardinality_only {
         NONA_FLAG_PSI_CA
@@ -842,9 +866,13 @@ fn run_blind(config: &CliConfig) -> Result<(), (String, i32)> {
     }
 
     let mut client = connect_client(config)?;
-    let blinded = client
-        .blind_stream_chunked(&stream_payload)
-        .map_err(|e| (format!("Phase 1 blinding failed: {e:?}"), 1))?;
+    let blinded = if config.dev_simulation {
+        let sim_key = [0x42u8; 32];
+        client.blind_stream_chunked_with_key(&sim_key, &stream_payload)
+    } else {
+        client.blind_stream_chunked(&stream_payload)
+    }
+    .map_err(|e| (format!("Phase 1 blinding failed: {e:?}"), 1))?;
 
     if let Some(ref out_path) = config.output_file {
         fs::write(out_path, &blinded)

@@ -1,6 +1,4 @@
-// ============================================================================
-// BENCHMARK: engine_benchmarks.rs - High-Precision Zero-Allocation Microbenchmarks
-// ============================================================================
+//! High-precision zero-allocation microbenchmarks for core engine primitives.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};

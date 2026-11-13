@@ -51,6 +51,7 @@ fi
 
 RUNNERS=(
     "tests/integration/c_runner.c"
+    "tests/integration/fuzz_runner.c"
     "tests/integration/kat_runner.c"
     "tests/integration/cardinality_boundary_runner.c"
     "tests/integration/e2e_pipeline_runner.c"

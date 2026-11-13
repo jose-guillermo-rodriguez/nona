@@ -1773,42 +1773,19 @@ pub fn clamp_noisy_cardinality(raw_cardinality: u64, noise: i64, n_elements: u64
 }
 
 #[cfg(not(verus))]
-#[inline(always)]
+#[inline(never)]
 /// Satisfies [FR-22-PSICA]
-/// Retrieves 32 bits of entropy from OS/enclave runtime with architectural fallback.
-fn get_system_entropy_u64() -> u64 {
-    #[allow(unused_variables, unused_mut)]
-    let mut seed: u64 = 0;
-    #[cfg(target_os = "macos")]
-    unsafe {
-        extern "C" {
-            fn getentropy(buf: *mut core::ffi::c_void, buflen: usize) -> core::ffi::c_int;
-        }
-        if getentropy((&raw mut seed).cast::<core::ffi::c_void>(), 8) == 0 {
-            return seed;
-        }
+/// Harvests 64 bits of hardware entropy exclusively via direct `/dev/nsm` IOCTL.
+/// Immediately aborts via `zeroize_and_abort` if NSM entropy is unavailable.
+fn get_nsm_entropy_u64() -> u64 {
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::attestation::nsm_get_random_u64()
     }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        extern "C" {
-            fn getrandom(
-                buf: *mut core::ffi::c_void,
-                buflen: usize,
-                flags: core::ffi::c_uint,
-            ) -> isize;
-        }
-        if getrandom((&raw mut seed).cast::<core::ffi::c_void>(), 8, 0) == 8 {
-            return seed;
-        }
+    #[cfg(target_os = "none")]
+    {
+        crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
     }
-    #[cfg(all(target_os = "none", target_arch = "x86_64"))]
-    unsafe {
-        let mut rdrand_val: u64 = 0;
-        if core::arch::x86_64::_rdrand64_step(&mut rdrand_val) == 1 {
-            return rdrand_val;
-        }
-    }
-    crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
 }
 
 #[cfg(not(verus))]
@@ -1816,7 +1793,7 @@ fn get_system_entropy_u64() -> u64 {
 /// Satisfies [FR-22-PSICA]
 /// In-enclave constant-time noise injection and bounds clamping for PSI-Cardinality mode.
 pub fn inject_differential_privacy_noise(raw_cardinality: u64, n_elements: usize) -> u64 {
-    let entropy = get_system_entropy_u64();
+    let entropy = get_nsm_entropy_u64();
     let noise = sample_discrete_laplace_noise_from_entropy(entropy);
     clamp_noisy_cardinality(raw_cardinality, noise, n_elements as u64)
 }
@@ -2202,27 +2179,33 @@ mod tests {
         first_idx.copy_from_slice(&match_indices.0[0..4]);
         assert_eq!(u32::from_le_bytes(first_idx), 1);
 
-        // Phase 2: Intersect in PSI_CA (Shannon Entropy Decimation) mode
-        card_out.0 = 0;
-        let st_ca = unsafe {
-            nona_phase2_intersect_impl(
-                blinded_a.0.as_ptr(),
-                64,
-                blinded_b.0.as_ptr(),
-                64,
-                2,
-                match_indices.0.as_mut_ptr(),
-                64,
-                NONA_FLAG_PSI_CA,
-                &raw mut card_out.0,
-            )
-        };
-        assert_eq!(st_ca, NONA_SUCCESS);
-        assert!(
-            card_out.0 <= 2,
-            "Cardinality under DP must be clamped within [0, n_elements]"
-        );
-        assert_eq!(match_indices.0, [0u8; 64]);
+        // Phase 2: Intersect in PSI_CA mode (requires /dev/nsm hardware entropy)
+        if std::path::Path::new("/dev/nsm").exists() {
+            card_out.0 = 0;
+            let st_ca = unsafe {
+                nona_phase2_intersect_impl(
+                    blinded_a.0.as_ptr(),
+                    64,
+                    blinded_b.0.as_ptr(),
+                    64,
+                    2,
+                    match_indices.0.as_mut_ptr(),
+                    64,
+                    NONA_FLAG_PSI_CA,
+                    &raw mut card_out.0,
+                )
+            };
+            assert_eq!(st_ca, NONA_SUCCESS);
+            assert!(
+                card_out.0 <= 2,
+                "Cardinality under DP must be clamped within [0, n_elements]"
+            );
+            assert_eq!(match_indices.0, [0u8; 64]);
+        } else {
+            let noise = sample_discrete_laplace_noise_from_entropy(0x0123_4567_89ab_cdef);
+            let clamped = clamp_noisy_cardinality(1, noise, 2);
+            assert!(clamped <= 2);
+        }
     }
 
     #[test]
@@ -2400,29 +2383,49 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
     let n_b = len_b / 32;
 
     if n_a == 0 || n_b == 0 || n_elements == 0 {
-        return -3;
+        return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+
+    if (flags & !(NONA_FLAG_PSI_PR | NONA_FLAG_PSI_SUM)) != 0 {
+        return crate::gatekeeper::NONA_ERR_INVALID_FLAGS;
     }
 
     let is_pr = (flags & NONA_FLAG_PSI_PR) != 0;
     let is_sum = (flags & NONA_FLAG_PSI_SUM) != 0;
 
     if is_pr && (payloads_b.is_null() || payloads_out.is_null()) {
-        return -1;
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
     }
 
-    if is_sum && sum_out.is_null() {
-        return -1;
+    if is_pr && (((payloads_b as usize) | (payloads_out as usize)) & 7) != 0 {
+        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
     }
 
-    if is_pr
-        && !crate::gatekeeper::is_disjoint(
-            payloads_b.cast::<u8>(),
-            n_b * 8,
-            payloads_out.cast_const().cast::<u8>(),
-            out_capacity * 8,
-        )
-    {
-        return -4;
+    if is_sum {
+        crate::validate_ffi_ptr!(sum_out, 8, crate::gatekeeper::NONA_ERR_NULL_POINTER);
+    }
+
+    if is_pr {
+        let Some(payloads_b_bytes) = n_b.checked_mul(8) else {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        };
+        let Some(payloads_out_bytes) = n_elements.checked_mul(8) else {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        };
+        let pb_ptr = payloads_b.cast::<u8>();
+        let po_ptr = payloads_out.cast_const().cast::<u8>();
+        if !crate::gatekeeper::is_disjoint(pb_ptr, payloads_b_bytes, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(blinded_a, len_a, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(blinded_b, len_b, po_ptr, payloads_out_bytes)
+            || !crate::gatekeeper::is_disjoint(
+                match_indices_out.cast_const(),
+                out_capacity,
+                po_ptr,
+                payloads_out_bytes,
+            )
+        {
+            return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
+        }
     }
 
     let mut total_cardinality: u64 = 0;
@@ -2467,7 +2470,7 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
                 );
             }
 
-            if is_pr && card_idx < out_capacity {
+            if is_pr && card_idx < n_elements {
                 *payloads_out.add(card_idx) = element_payload_sum;
             }
 
@@ -2494,7 +2497,7 @@ verus! {
 use vstd::prelude::*;
 use vstd::arithmetic::div_mod::*;
 
-pub assume_specification [ i64::wrapping_neg ] (a: i64) -> (res: i64);
+/// Hardware compiler memory-ordering barrier boundary (no ghost state mutation).
 pub assume_specification [ core::sync::atomic::compiler_fence ] (o: core::sync::atomic::Ordering);
 
 /// Prime modulus p = 2^256 - 2^32 - 977 for the finite field Fp.
@@ -2662,6 +2665,31 @@ pub proof fn lemma_swap_bits(a: u64, b: u64, swap: u64)
         let next_b = b ^ temp;
         (swap == 1 ==> (next_a == b && next_b == a)) &&
         (swap == 0 ==> (next_a == a && next_b == b))
+    })) by(bit_vector);
+}
+
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Bit-vector SAT proof lemma verifying branchless constant-time conditional move.
+pub proof fn lemma_cmov_bits(a: u64, b: u64, condition: u64)
+    requires
+        condition == 0 || condition == 1,
+    ensures
+        ({
+            let mask = 0u64.wrapping_sub(condition);
+            let temp = mask & (a ^ b);
+            let next_a = a ^ temp;
+            (condition == 1 ==> next_a == b) &&
+            (condition == 0 ==> next_a == a)
+        })
+{
+    assert(({
+        let mask = 0u64.wrapping_sub(condition);
+        let temp = mask & (a ^ b);
+        let next_a = a ^ temp;
+        (condition == 1 ==> next_a == b) &&
+        (condition == 0 ==> next_a == a)
     })) by(bit_vector);
 }
 
@@ -3665,11 +3693,11 @@ impl FieldElement {
     /// Satisfies [FR-12-FORMALSPEC]
     /// Modular multiplication: self * other (mod p), constant-time.
     ///
-    /// # Trusted Computing Base (TCB) Boundary [VERIF-02]
+    /// # Trusted Computing Base (TCB) Boundary
     /// Axiomatic primitive boundary: Non-linear degree-2 multi-limb multiplication
     /// and Solinas reduction modulo p = 2^256 - 2^32 - 977 are formally axiomatized
     /// under #[verifier::external_body]. Dead internal proof annotations, unverified loop
-    /// invariants, and ghost assertions were audited and stripped under VERIF-02 to
+    /// invariants, and ghost assertions were stripped from the axiomatic boundary to
     /// eliminate misleading verification claims and maintain an honest SMT trust surface.
     /// Tracked formally in docs/TCB.md §3.
     #[verifier::external_body]
@@ -3741,27 +3769,33 @@ impl FieldElement {
             condition == 0 || condition == 1,
         ensures
             final(self).is_valid(),
+            condition == 0 ==> final(self).to_nat() == old(self).to_nat(),
+            condition == 1 ==> final(self).to_nat() == other.to_nat(),
     {
-        let mask = if condition == 1 { 0xFFFFFFFFFFFFFFFF_u64 } else { 0_u64 };
-        let mut i: usize = 0;
-        while i < 4
-            invariant
-                0 <= i <= 4,
-                condition == 0 || condition == 1,
-                mask == (if condition == 1 { 0xFFFFFFFFFFFFFFFF_u64 } else { 0_u64 }),
-            decreases 4 - i
-        {
-            let diff = self.limbs[i] ^ other.limbs[i];
-            self.limbs[i] = self.limbs[i] ^ (diff & mask);
-            i += 1;
-        }
+        let mask = 0u64.wrapping_sub(condition);
+
+        let old_s0 = self.limbs[0];
+        proof { lemma_cmov_bits(old_s0, other.limbs[0], condition); }
+        let temp0 = mask & (self.limbs[0] ^ other.limbs[0]);
+        self.limbs[0] ^= temp0;
+
+        let old_s1 = self.limbs[1];
+        proof { lemma_cmov_bits(old_s1, other.limbs[1], condition); }
+        let temp1 = mask & (self.limbs[1] ^ other.limbs[1]);
+        self.limbs[1] ^= temp1;
+
+        let old_s2 = self.limbs[2];
+        proof { lemma_cmov_bits(old_s2, other.limbs[2], condition); }
+        let temp2 = mask & (self.limbs[2] ^ other.limbs[2]);
+        self.limbs[2] ^= temp2;
+
+        let old_s3 = self.limbs[3];
+        proof { lemma_cmov_bits(old_s3, other.limbs[3], condition); }
+        let temp3 = mask & (self.limbs[3] ^ other.limbs[3]);
+        self.limbs[3] ^= temp3;
+
         proof {
-            if condition == 0 {
-                assume(self.limbs =~= old(self).limbs);
-            } else {
-                assume(self.limbs =~= other.limbs);
-            }
-            assume(self.is_valid());
+            reveal(FieldElement::to_nat);
         }
     }
 

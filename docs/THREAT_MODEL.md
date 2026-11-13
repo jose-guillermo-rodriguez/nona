@@ -46,7 +46,14 @@ All external interactions pass across the AF_VSOCK / C-ABI boundary, where all i
 
 ### 2.5 Malicious Entropy Injection
 - Threat: The host hypervisor returns degraded, static, or predictable random numbers to weaken blinding factors.
-- Defense: Entropy is harvested strictly from the hardware Nitro Security Module (NSM) or hardware RDRAND/RDSEED. Short reads, timeouts, or harvest failures trigger an immediate zeroize_and_abort.
+- Defense: Entropy is harvested solely via direct `/dev/nsm` `GetRandom` IOCTL requests. Short reads, all-zero blocks, device unavailability, or harvest failures trigger an immediate `zeroize_and_abort(NONA_ERR_INTERNAL_PANIC)` with zero fallback to CPU RNG instructions, OS syscalls, or system clocks.
+
+### 2.6 Hypervisor Time-Warp & Clock Manipulation (ENCL-11 / FR-36-TIMEWARP)
+- Threat: A compromised host OS or hypervisor warps wall-clock time (`CLOCK_REALTIME` / `SystemTime`) backward or forward to resurrect expired attestation documents, bypass X.509 certificate expiration (`not_after`), predict challenge nonces, or extend session key lifetimes indefinitely.
+- Defense:
+  - Live challenge-response attestation (`NonaClient::attest_and_bind`) is completely isolated from host `SystemTime`. Freshness is bound by a local `CLOCK_MONOTONIC` (`Instant`) round-trip interval (`<= 30s`), a 256-bit OS CSPRNG + atomic monotonic counter challenge nonce, and an ECDSA-P384 hardware-signed NSM timestamp verified against a strictly monotonic high-water-mark counter.
+  - Detached verification enforces a monotonic-anchored reference clock (`advance_monotonic_reference_secs`) that refuses backward wall-clock regression, alongside explicit verified external timestamp entry points (`parse_and_verify_cose_attestation_at`).
+  - Inside the `#![no_std]` enclave, ephemeral session keys enforce a monotonic `epoch` and `ChannelToken` operation ceiling (`MAX_SESSION_OPS`) independent of wall-clock time, while `CLOCK_MONOTONIC` failure triggers immediate `zeroize_and_abort`.
 
 ---
 

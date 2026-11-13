@@ -57,6 +57,8 @@ pub mod attestation;
 pub mod aws_root_ca;
 pub mod crypto;
 #[cfg(not(target_os = "none"))]
+pub mod enclave_boundaries;
+#[cfg(not(target_os = "none"))]
 pub mod enclave_server;
 pub mod exception;
 pub mod gatekeeper;
@@ -70,7 +72,8 @@ pub use crate::crypto::nona_adaptive_psi_route;
 pub use crate::obfuscation::nona_permute_index;
 
 pub use crate::psi::{
-    nona_phase1_blind, nona_phase1_blind_impl, nona_phase2_intersect, nona_phase2_intersect_impl,
+    NONA_FLAG_FULL_PSI, NONA_FLAG_PSI_CA, NONA_FLAG_PSI_PR, NONA_FLAG_PSI_SUM, nona_phase1_blind,
+    nona_phase1_blind_impl, nona_phase2_intersect, nona_phase2_intersect_impl,
     nona_phase2_intersect_payload, nona_phase2_reblind, nona_phase2_reblind_impl,
 };
 
@@ -195,6 +198,9 @@ extern "C" fn handle_signal(sig: libc::c_int) {
 /// Substrate initialization disabling core dumps, locking RAM (mlockall), and binding signal traps.
 /// Host defense mechanics (page-locking and core-dump suppression) are gated behind feature = "host-defense".
 pub extern "C" fn nona_core_init() -> i32 {
+    #[cfg(not(target_os = "none"))]
+    enclave_server::harden_enclave_process();
+
     #[cfg(feature = "host-defense")]
     unsafe {
         let limit = libc::rlimit {
@@ -412,7 +418,7 @@ pub unsafe extern "C" fn nona_validate_ffi_bounds(
 pub mod client;
 
 #[cfg(test)]
-mod tests_f26 {
+mod sanitization_boundary_tests {
     use super::*;
 
     #[test]

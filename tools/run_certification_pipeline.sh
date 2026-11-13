@@ -58,8 +58,9 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "host" ]; then
     make sbom
 
     echo ""
-    echo ">>> [STAGE 4/9] #![no_std] Core Substrate Build Gate..."
+    echo ">>> [STAGE 4/9] #![no_std] Core Substrate Build & Freestanding C-ABI Gate..."
     cargo build --release --lib --no-default-features
+    RUSTFLAGS="-C panic=abort" cargo test --test test_c_abi --no-default-features
 
     echo ""
     echo ">>> [STAGE 5/9] Full Rust Test Matrix (Unit, Integration & Doctests)..."
@@ -108,19 +109,9 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "container" ]; then
     fi
 
     if [ "$HAS_CONTAINER" -eq 0 ]; then
-        if [ "$MODE" = "container" ]; then
-            echo "[FATAL] Container verification requested, but no active container engine was found." >&2
-            echo "[HINT] Ensure Podman or Docker is running (e.g., 'podman machine start')." >&2
-            exit 1
-        else
-            echo ""
-            echo "======================================================================"
-            echo " [!] NOTICE: Container daemon is offline or not installed."
-            echo " Skipping Phase 2 container audits. To run them, start Podman/Docker"
-            echo " and invoke: make container-all"
-            echo "======================================================================"
-            exit 0
-        fi
+        echo "[FATAL] Container verification required for mode '${MODE}', but no active container engine was found." >&2
+        echo "[HINT] Start Podman/Docker (e.g., 'podman machine start') or run '--host-only' / 'make host'." >&2
+        exit 1
     fi
 
     echo ""

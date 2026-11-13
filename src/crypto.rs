@@ -182,13 +182,13 @@ const LAMBDA_L1: u64 = 0x4551231950b75fc4;
 /// Satisfies [FR-18-ZEROREM]
 /// Cache-aligned (64-byte) 256-bit secp256k1 scalar field element modulo q.
 ///
-/// # Trusted Computing Base (TCB) Boundary Classification [VERIF-03]
+/// # Trusted Computing Base (TCB) Boundary Classification
 /// High-Assurance Runtime Perimeter (Tier 3): secp256k1 scalar group arithmetic
 /// modulo q and endomorphism reduction (lambda-decomposition) are explicitly scoped
 /// out of the formal SMT inductive verification surface due to non-linear degree-2
 /// reduction decidability limits. Canonicity, non-overflow, and algebraic distributivity
-/// are validated via differential oracle fuzzing (TEST-02), Wycheproof vectors, and
-/// domain boundary suites (TEST-08). Formally cataloged in docs/TCB.md §3 and SPECIFICATION.md §4.5.0.
+/// are validated via differential oracle fuzzing, Wycheproof vectors, and
+/// domain boundary suites. Formally cataloged in docs/TCB.md §3 and SPECIFICATION.md §4.5.0.
 pub struct Scalar {
     pub limbs: [u64; 4],
 }
@@ -678,6 +678,922 @@ fn sha512_process_block(state: &mut [u64; 8], block: &[u8; 128]) {
     w.fill(0);
 }
 
+
+// ============================================================================
+// FIPS 180-4 SECURE HASH STANDARD: SHA-384 (Zero Allocations / Constant Time)
+// ============================================================================
+
+pub fn sha384_digest(data: &[u8]) -> [u8; 48] {
+    let mut state: [u64; 8] = [
+        0xcbbb9d5dc1059ed8,
+        0x629a292a367cd507,
+        0x9159015a3070dd17,
+        0x152fecd8f70e5939,
+        0x67332667ffc00b31,
+        0x8eb44a8768581511,
+        0xdb0c2e0d64f98fa7,
+        0x47b5481dbefa4fa4,
+    ];
+
+    let total_len = data.len();
+    let mut chunk_buf = [0u8; 128];
+    let mut offset = 0;
+
+    while offset + 128 <= total_len {
+        chunk_buf.copy_from_slice(&data[offset..offset + 128]);
+        sha512_process_block(&mut state, &chunk_buf);
+        offset += 128;
+    }
+
+    let rem = total_len - offset;
+    chunk_buf[..rem].copy_from_slice(&data[offset..]);
+    chunk_buf[rem] = 0x80;
+
+    if rem + 1 > 112 {
+        for b in &mut chunk_buf[rem + 1..] {
+            *b = 0;
+        }
+        sha512_process_block(&mut state, &chunk_buf);
+        chunk_buf = [0u8; 128];
+    } else {
+        for b in &mut chunk_buf[rem + 1..112] {
+            *b = 0;
+        }
+    }
+
+    let bit_len = (total_len as u128) * 8;
+    let bit_len_bytes = bit_len.to_be_bytes();
+    chunk_buf[112..128].copy_from_slice(&bit_len_bytes);
+    sha512_process_block(&mut state, &chunk_buf);
+
+    let mut out = [0u8; 48];
+    let mut i = 0;
+    while i < 6 {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&state[i].to_be_bytes());
+        i += 1;
+    }
+    ct_zeroize(&mut chunk_buf);
+    out
+}
+
+// ============================================================================
+// NIST P-384 (secp384r1) Elliptic Curve & ECDSA-SHA384 Verification (#![no_std])
+// ============================================================================
+
+/// P-384 prime field modulus p = 2^384 - 2^128 - 2^96 + 2^32 - 1 (little-endian limbs)
+const P384_P: [u64; 6] = [
+    0x0000_0000_ffff_ffff,
+    0xffff_ffff_0000_0000,
+    0xffff_ffff_ffff_fffe,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+];
+
+/// P-384 scalar group order n (little-endian limbs)
+const P384_N: [u64; 6] = [
+    0xecec_196a_ccc5_2973,
+    0x581a_0db2_48b0_a77a,
+    0xc763_4d81_f437_2ddf,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+];
+
+/// 2^384 - n (190-bit residual for fast multi-precision reduction mod n)
+const P384_DELTA_N: [u64; 3] = [
+    0x1313_e695_333a_d68d,
+    0xa7e5_f24d_b74f_5885,
+    0x389c_b27e_0bc8_d220,
+];
+
+/// P-384 curve parameter b (little-endian limbs)
+const P384_B: [u64; 6] = [
+    0x2a85_c8ed_d3ec_2aef,
+    0xc656_398d_8a2e_d19d,
+    0x0314_088f_5013_875a,
+    0x181d_9c6e_fe81_4112,
+    0x988e_056b_e3f8_2d19,
+    0xb331_2fa7_e23e_e7e4,
+];
+
+/// P-384 generator G_x (little-endian limbs)
+const P384_GX: [u64; 6] = [
+    0x3a54_5e38_7276_0ab7,
+    0x5502_f25d_bf55_296c,
+    0x59f7_41e0_8254_2a38,
+    0x6e1d_3b62_8ba7_9b98,
+    0x8eb1_c71e_f320_ad74,
+    0xaa87_ca22_be8b_0537,
+];
+
+/// P-384 generator G_y (little-endian limbs)
+const P384_GY: [u64; 6] = [
+    0x7a43_1d7c_90ea_0e5f,
+    0x0a60_b1ce_1d7e_819d,
+    0xe9da_3113_b5f0_b8c0,
+    0xf8f4_1dbd_289a_147c,
+    0x5d9e_98bf_9292_dc29,
+    0x3617_de4a_9626_2c6f,
+];
+
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn u384_add_raw(a: &[u64; 6], b: &[u64; 6]) -> (u64, [u64; 6]) {
+    let mut res = [0u64; 6];
+    let mut carry = 0u128;
+    let mut i = 0;
+    while i < 6 {
+        let sum = (a[i] as u128) + (b[i] as u128) + carry;
+        res[i] = sum as u64;
+        carry = sum >> 64;
+        i += 1;
+    }
+    (carry as u64, res)
+}
+
+#[inline(always)]
+fn u384_sub_raw(a: &[u64; 6], b: &[u64; 6]) -> (u64, [u64; 6]) {
+    let mut res = [0u64; 6];
+    let mut borrow = 0u64;
+    let mut i = 0;
+    while i < 6 {
+        let (d1, b1) = a[i].overflowing_sub(borrow);
+        let (d2, b2) = d1.overflowing_sub(b[i]);
+        res[i] = d2;
+        borrow = (b1 as u64) | (b2 as u64);
+        i += 1;
+    }
+    (borrow, res)
+}
+
+#[inline(always)]
+fn u384_ct_select(mask: u64, a: &[u64; 6], b: &[u64; 6]) -> [u64; 6] {
+    let mut res = [0u64; 6];
+    let mut i = 0;
+    while i < 6 {
+        res[i] = (a[i] & mask) | (b[i] & !mask);
+        i += 1;
+    }
+    res
+}
+
+#[inline(always)]
+fn u384_is_zero(a: &[u64; 6]) -> bool {
+    (a[0] | a[1] | a[2] | a[3] | a[4] | a[5]) == 0
+}
+
+#[inline(always)]
+fn u384_lt(a: &[u64; 6], b: &[u64; 6]) -> bool {
+    let (borrow, _) = u384_sub_raw(a, b);
+    borrow == 1
+}
+
+#[inline(always)]
+fn u384_from_be_bytes(bytes: &[u8; 48]) -> [u64; 6] {
+    let mut limbs = [0u64; 6];
+    let mut i = 0;
+    while i < 6 {
+        let offset = (5 - i) * 8;
+        limbs[i] = u64::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]);
+        i += 1;
+    }
+    limbs
+}
+
+#[inline(always)]
+fn u384_to_be_bytes(limbs: &[u64; 6]) -> [u8; 48] {
+    let mut out = [0u8; 48];
+    let mut i = 0;
+    while i < 6 {
+        let offset = (5 - i) * 8;
+        out[offset..offset + 8].copy_from_slice(&limbs[i].to_be_bytes());
+        i += 1;
+    }
+    out
+}
+
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn u384_mul_768(a: &[u64; 6], b: &[u64; 6]) -> [u64; 12] {
+    let mut r = [0u64; 12];
+    let mut i = 0;
+    while i < 6 {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < 6 {
+            let val = (a[i] as u128) * (b[j] as u128) + (r[i + j] as u128) + (carry as u128);
+            r[i + j] = val as u64;
+            carry = (val >> 64) as u64;
+            j += 1;
+        }
+        r[i + 6] = carry;
+        i += 1;
+    }
+    r
+}
+
+/// Folds a 6-limb (384-bit) upper value `hi` into a 9-limb value:
+/// `lo + (hi << 128) + (hi << 96) - (hi << 32) + hi`
+/// using exact identity 2^384 ≡ 2^128 + 2^96 - 2^32 + 1 (mod p).
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn p384_fold_upper_6(lo: &[u64; 6], hi: &[u64; 6]) -> [u64; 9] {
+    // 1. Add lo + hi + (hi << 128) + (hi << 96)
+    let mut acc = [0u64; 9];
+    let mut carry = 0u128;
+    let mut i = 0;
+    while i < 9 {
+        let lo_term = if i < 6 { lo[i] as u128 } else { 0 };
+        let hi_term = if i < 6 { hi[i] as u128 } else { 0 };
+        let shl128_term = if (2..8).contains(&i) {
+            hi[i - 2] as u128
+        } else {
+            0
+        };
+        let shl96_term = match i {
+            1 => (hi[0] << 32) as u128,
+            2..=6 => ((hi[i - 1] << 32) | (hi[i - 2] >> 32)) as u128,
+            7 => (hi[5] >> 32) as u128,
+            _ => 0,
+        };
+        let sum = lo_term + hi_term + shl128_term + shl96_term + carry;
+        acc[i] = sum as u64;
+        carry = sum >> 64;
+        i += 1;
+    }
+
+    // 2. Subtract (hi << 32) (at most 7 limbs: indices 0..=6)
+    let mut borrow = 0u64;
+    let mut j = 0;
+    while j < 9 {
+        let sub_term = match j {
+            0 => hi[0] << 32,
+            1..=5 => (hi[j] << 32) | (hi[j - 1] >> 32),
+            6 => hi[5] >> 32,
+            _ => 0,
+        };
+        let (d1, b1) = acc[j].overflowing_sub(borrow);
+        let (d2, b2) = d1.overflowing_sub(sub_term);
+        acc[j] = d2;
+        borrow = (b1 as u64) | (b2 as u64);
+        j += 1;
+    }
+    acc
+}
+
+/// Folds a 3-limb upper value `hi1` into a 6-limb `lo1` modulo P384_P.
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn p384_fold_upper_3(lo1: &[u64; 6], hi1: &[u64; 3]) -> [u64; 7] {
+    let mut acc = [0u64; 7];
+    let mut carry = 0u128;
+    let mut i = 0;
+    while i < 7 {
+        let lo_term = if i < 6 { lo1[i] as u128 } else { 0 };
+        let hi_term = if i < 3 { hi1[i] as u128 } else { 0 };
+        let shl128_term = if (2..5).contains(&i) {
+            hi1[i - 2] as u128
+        } else {
+            0
+        };
+        let shl96_term = match i {
+            1 => (hi1[0] << 32) as u128,
+            2..=3 => ((hi1[i - 1] << 32) | (hi1[i - 2] >> 32)) as u128,
+            4 => (hi1[2] >> 32) as u128,
+            _ => 0,
+        };
+        let sum = lo_term + hi_term + shl128_term + shl96_term + carry;
+        acc[i] = sum as u64;
+        carry = sum >> 64;
+        i += 1;
+    }
+
+    let mut borrow = 0u64;
+    let mut j = 0;
+    while j < 7 {
+        let sub_term = match j {
+            0 => hi1[0] << 32,
+            1..=2 => (hi1[j] << 32) | (hi1[j - 1] >> 32),
+            3 => hi1[2] >> 32,
+            _ => 0,
+        };
+        let (d1, b1) = acc[j].overflowing_sub(borrow);
+        let (d2, b2) = d1.overflowing_sub(sub_term);
+        acc[j] = d2;
+        borrow = (b1 as u64) | (b2 as u64);
+        j += 1;
+    }
+    acc
+}
+
+#[inline(always)]
+fn p384_reduce_768(t: &[u64; 12]) -> [u64; 6] {
+    let lo = [t[0], t[1], t[2], t[3], t[4], t[5]];
+    let hi = [t[6], t[7], t[8], t[9], t[10], t[11]];
+    let t1 = p384_fold_upper_6(&lo, &hi);
+    let lo1 = [t1[0], t1[1], t1[2], t1[3], t1[4], t1[5]];
+    let hi1 = [t1[6], t1[7], t1[8]];
+    let t2 = p384_fold_upper_3(&lo1, &hi1);
+
+    let mut cur = [t2[0], t2[1], t2[2], t2[3], t2[4], t2[5]];
+    let mut top = t2[6];
+
+    // At most 2 conditional subtractions of P384_P
+    let mut pass = 0;
+    while pass < 2 {
+        let (borrow, diff) = u384_sub_raw(&cur, &P384_P);
+        let ge_p = (top != 0) || (borrow == 0);
+        let mask = 0u64.wrapping_sub(ge_p as u64);
+        cur = u384_ct_select(mask, &diff, &cur);
+        top = top.saturating_sub(ge_p as u64);
+        pass += 1;
+    }
+    cur
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fe384 {
+    limbs: [u64; 6],
+}
+
+impl Fe384 {
+    const ZERO: Self = Self { limbs: [0; 6] };
+    const ONE: Self = Self {
+        limbs: [1, 0, 0, 0, 0, 0],
+    };
+
+    fn from_be_bytes(bytes: &[u8; 48]) -> Option<Self> {
+        let limbs = u384_from_be_bytes(bytes);
+        if u384_lt(&limbs, &P384_P) {
+            Some(Self { limbs })
+        } else {
+            None
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        u384_is_zero(&self.limbs)
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let (carry, s) = u384_add_raw(&self.limbs, &other.limbs);
+        let (borrow, d) = u384_sub_raw(&s, &P384_P);
+        let cond = carry | (1u64.wrapping_sub(borrow));
+        let mask = !(cond.wrapping_sub(1));
+        Self {
+            limbs: u384_ct_select(mask, &d, &s),
+        }
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        let (borrow, d) = u384_sub_raw(&self.limbs, &other.limbs);
+        let ( _, d_plus_p) = u384_add_raw(&d, &P384_P);
+        let mask = 0u64.wrapping_sub(borrow);
+        Self {
+            limbs: u384_ct_select(mask, &d_plus_p, &d),
+        }
+    }
+
+    fn double(&self) -> Self {
+        self.add(self)
+    }
+
+    fn mul(&self, other: &Self) -> Self {
+        let prod = u384_mul_768(&self.limbs, &other.limbs);
+        Self {
+            limbs: p384_reduce_768(&prod),
+        }
+    }
+
+    fn square(&self) -> Self {
+        self.mul(self)
+    }
+
+    /// Computes `self^(p - 2) mod p` via constant-time square-and-multiply.
+    fn invert(&self) -> Self {
+        let mut exp = P384_P;
+        // p - 2: P384_P[0] is 0xffffffff, so subtracting 2 yields 0xfffffffd without borrow
+        exp[0] -= 2;
+
+        let mut acc = Self::ONE;
+        let mut bit_idx: i32 = 383;
+        while bit_idx >= 0 {
+            acc = acc.square();
+            let idx = usize::try_from(bit_idx).unwrap_or(0);
+            let limb = exp[idx / 64];
+            let bit = (limb >> (idx % 64)) & 1;
+            let prod = acc.mul(self);
+            let mask = 0u64.wrapping_sub(bit);
+            acc = Self {
+                limbs: u384_ct_select(mask, &prod.limbs, &acc.limbs),
+            };
+            bit_idx -= 1;
+        }
+        acc
+    }
+}
+
+/// Multiplies a 6-limb value `hi` by the 3-limb residual `P384_DELTA_N`, adding `lo`.
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn n384_mul_add_6x3(lo: &[u64; 6], hi: &[u64; 6]) -> [u64; 9] {
+    let mut r = [0u64; 9];
+    r[..6].copy_from_slice(lo);
+    let mut i = 0;
+    while i < 6 {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < 3 {
+            let val = (hi[i] as u128) * (P384_DELTA_N[j] as u128)
+                + (r[i + j] as u128)
+                + (carry as u128);
+            r[i + j] = val as u64;
+            carry = (val >> 64) as u64;
+            j += 1;
+        }
+        let mut k = i + 3;
+        let mut c = carry as u128;
+        while c > 0 && k < 9 {
+            let sum = (r[k] as u128) + c;
+            r[k] = sum as u64;
+            c = sum >> 64;
+            k += 1;
+        }
+        i += 1;
+    }
+    r
+}
+
+/// Multiplies a 3-limb value `hi1` by `P384_DELTA_N` (3 limbs), adding 6-limb `lo1`.
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+fn n384_mul_add_3x3(lo1: &[u64; 6], hi1: &[u64; 3]) -> [u64; 7] {
+    let mut r = [0u64; 7];
+    r[..6].copy_from_slice(lo1);
+    let mut i = 0;
+    while i < 3 {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < 3 {
+            let val = (hi1[i] as u128) * (P384_DELTA_N[j] as u128)
+                + (r[i + j] as u128)
+                + (carry as u128);
+            r[i + j] = val as u64;
+            carry = (val >> 64) as u64;
+            j += 1;
+        }
+        let mut k = i + 3;
+        let mut c = carry as u128;
+        while c > 0 && k < 7 {
+            let sum = (r[k] as u128) + c;
+            r[k] = sum as u64;
+            c = sum >> 64;
+            k += 1;
+        }
+        i += 1;
+    }
+    r
+}
+
+#[inline(always)]
+fn n384_reduce_768(t: &[u64; 12]) -> [u64; 6] {
+    let lo = [t[0], t[1], t[2], t[3], t[4], t[5]];
+    let hi = [t[6], t[7], t[8], t[9], t[10], t[11]];
+    let t1 = n384_mul_add_6x3(&lo, &hi);
+    let lo1 = [t1[0], t1[1], t1[2], t1[3], t1[4], t1[5]];
+    let hi1 = [t1[6], t1[7], t1[8]];
+    let t2 = n384_mul_add_3x3(&lo1, &hi1);
+
+    let mut cur = [t2[0], t2[1], t2[2], t2[3], t2[4], t2[5]];
+    let mut top = t2[6];
+    let mut pass = 0;
+    while pass < 2 {
+        let (borrow, diff) = u384_sub_raw(&cur, &P384_N);
+        let ge_n = (top != 0) || (borrow == 0);
+        let mask = 0u64.wrapping_sub(ge_n as u64);
+        cur = u384_ct_select(mask, &diff, &cur);
+        top = top.saturating_sub(ge_n as u64);
+        pass += 1;
+    }
+    cur
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Scalar384 {
+    limbs: [u64; 6],
+}
+
+impl Scalar384 {
+    const ONE: Self = Self {
+        limbs: [1, 0, 0, 0, 0, 0],
+    };
+
+    fn from_be_bytes_nonzero(bytes: &[u8; 48]) -> Option<Self> {
+        let limbs = u384_from_be_bytes(bytes);
+        if u384_is_zero(&limbs) || !u384_lt(&limbs, &P384_N) {
+            None
+        } else {
+            Some(Self { limbs })
+        }
+    }
+
+    fn from_be_bytes_reduced(bytes: &[u8; 48]) -> Self {
+        let mut limbs = u384_from_be_bytes(bytes);
+        let (borrow, diff) = u384_sub_raw(&limbs, &P384_N);
+        let mask = 0u64.wrapping_sub((borrow == 0) as u64);
+        limbs = u384_ct_select(mask, &diff, &limbs);
+        Self { limbs }
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    fn is_zero(&self) -> bool {
+        u384_is_zero(&self.limbs)
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    fn to_be_bytes(self) -> [u8; 48] {
+        u384_to_be_bytes(&self.limbs)
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    fn add(&self, other: &Self) -> Self {
+        let (carry, s) = u384_add_raw(&self.limbs, &other.limbs);
+        let (borrow, d) = u384_sub_raw(&s, &P384_N);
+        let cond = carry | (1u64.wrapping_sub(borrow));
+        let mask = !(cond.wrapping_sub(1));
+        Self {
+            limbs: u384_ct_select(mask, &d, &s),
+        }
+    }
+
+    fn mul(&self, other: &Self) -> Self {
+        let prod = u384_mul_768(&self.limbs, &other.limbs);
+        Self {
+            limbs: n384_reduce_768(&prod),
+        }
+    }
+
+    fn square(&self) -> Self {
+        self.mul(self)
+    }
+
+    /// Computes `self^(n - 2) mod n` via constant-time square-and-multiply.
+    fn invert(&self) -> Self {
+        let mut exp = P384_N;
+        // P384_N[0] = 0xecec196accc52973 >= 2, so subtracting 2 does not underflow
+        exp[0] -= 2;
+
+        let mut acc = Self::ONE;
+        let mut bit_idx: i32 = 383;
+        while bit_idx >= 0 {
+            acc = acc.square();
+            let idx = usize::try_from(bit_idx).unwrap_or(0);
+            let limb = exp[idx / 64];
+            let bit = (limb >> (idx % 64)) & 1;
+            let prod = acc.mul(self);
+            let mask = 0u64.wrapping_sub(bit);
+            acc = Self {
+                limbs: u384_ct_select(mask, &prod.limbs, &acc.limbs),
+            };
+            bit_idx -= 1;
+        }
+        acc
+    }
+}
+
+/// Validated affine point on NIST P-384 (`secp384r1`: `y^2 ≡ x^3 - 3x + b mod p`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct P384Point {
+    x: Fe384,
+    y: Fe384,
+}
+
+impl P384Point {
+    pub const fn generator() -> Self {
+        Self {
+            x: Fe384 { limbs: P384_GX },
+            y: Fe384 { limbs: P384_GY },
+        }
+    }
+
+    /// Decodes a 97-byte SEC 1 uncompressed P-384 point (`0x04 || X(48) || Y(48)`)
+    /// and validates that `(x, y)` lies strictly on the `secp384r1` curve.
+    #[inline(never)]
+    pub fn from_uncompressed_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 97 || bytes[0] != 0x04 {
+            return None;
+        }
+        let mut xb = [0u8; 48];
+        let mut yb = [0u8; 48];
+        xb.copy_from_slice(&bytes[1..49]);
+        yb.copy_from_slice(&bytes[49..97]);
+
+        let x = Fe384::from_be_bytes(&xb)?;
+        let y = Fe384::from_be_bytes(&yb)?;
+
+        // Check y^2 == x^3 - 3x + b (mod p)
+        let lhs = y.square();
+        let x2 = x.square();
+        let x3 = x2.mul(&x);
+        let three_x = x.double().add(&x);
+        let b_fe = Fe384 { limbs: P384_B };
+        let rhs = x3.sub(&three_x).add(&b_fe);
+
+        if lhs == rhs {
+            Some(Self { x, y })
+        } else {
+            None
+        }
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    pub fn to_uncompressed_bytes(&self) -> [u8; 97] {
+        let mut out = [0u8; 97];
+        out[0] = 0x04;
+        out[1..49].copy_from_slice(&u384_to_be_bytes(&self.x.limbs));
+        out[49..97].copy_from_slice(&u384_to_be_bytes(&self.y.limbs));
+        out
+    }
+}
+
+#[derive(Clone, Copy)]
+struct P384Jacobian {
+    x: Fe384,
+    y: Fe384,
+    z: Fe384,
+}
+
+impl P384Jacobian {
+    const INFINITY: Self = Self {
+        x: Fe384::ONE,
+        y: Fe384::ONE,
+        z: Fe384::ZERO,
+    };
+
+    fn from_affine(pt: &P384Point) -> Self {
+        Self {
+            x: pt.x,
+            y: pt.y,
+            z: Fe384::ONE,
+        }
+    }
+
+    fn is_infinity(&self) -> bool {
+        self.z.is_zero()
+    }
+
+    /// Jacobian doubling for `a = -3`:
+    /// `M = 3*(X - Z^2)*(X + Z^2)`
+    fn double(&self) -> Self {
+        if self.is_infinity() || self.y.is_zero() {
+            return Self::INFINITY;
+        }
+        let z2 = self.z.square();
+        let x_minus_z2 = self.x.sub(&z2);
+        let x_plus_z2 = self.x.add(&z2);
+        let prod = x_minus_z2.mul(&x_plus_z2);
+        let m = prod.double().add(&prod); // 3 * (X^2 - Z^4)
+
+        let y2 = self.y.square();
+        let xy2 = self.x.mul(&y2);
+        let s = xy2.double().double(); // 4 * X * Y^2
+
+        let m2 = m.square();
+        let two_s = s.double();
+        let x3 = m2.sub(&two_s);
+
+        let y4 = y2.square();
+        let eight_y4 = y4.double().double().double();
+        let y3 = m.mul(&s.sub(&x3)).sub(&eight_y4);
+
+        let z3 = self.y.mul(&self.z).double();
+        Self {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+
+    /// Mixed Jacobian-Affine addition `self + q`.
+    fn add_mixed(&self, q: &P384Point) -> Self {
+        if self.is_infinity() {
+            return Self::from_affine(q);
+        }
+        let z1z1 = self.z.square();
+        let u2 = q.x.mul(&z1z1);
+        let s2 = q.y.mul(&self.z).mul(&z1z1);
+
+        let h = u2.sub(&self.x);
+        let r = s2.sub(&self.y);
+
+        if h.is_zero() {
+            if r.is_zero() {
+                return self.double();
+            }
+            return Self::INFINITY;
+        }
+
+        let hh = h.square();
+        let hhh = h.mul(&hh);
+        let v = self.x.mul(&hh);
+
+        let r2 = r.square();
+        let two_v = v.double();
+        let x3 = r2.sub(&hhh).sub(&two_v);
+
+        let y3 = r.mul(&v.sub(&x3)).sub(&self.y.mul(&hhh));
+        let z3 = self.z.mul(&h);
+        Self {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+
+    #[inline(never)]
+    fn scalar_mul(pt: &P384Point, scalar: &Scalar384) -> Self {
+        let mut acc = Self::INFINITY;
+        let mut bit_idx: i32 = 383;
+        while bit_idx >= 0 {
+            acc = acc.double();
+            let idx = usize::try_from(bit_idx).unwrap_or(0);
+            let limb = scalar.limbs[idx / 64];
+            let bit = (limb >> (idx % 64)) & 1;
+            if bit == 1 {
+                acc = acc.add_mixed(pt);
+            }
+            bit_idx -= 1;
+        }
+        acc
+    }
+
+    #[inline(never)]
+    fn add_jacobian(&self, other: &Self) -> Self {
+        if self.is_infinity() {
+            return *other;
+        }
+        if other.is_infinity() {
+            return *self;
+        }
+        let z1z1 = self.z.square();
+        let z2z2 = other.z.square();
+        let u1 = self.x.mul(&z2z2);
+        let u2 = other.x.mul(&z1z1);
+        let s1 = self.y.mul(&other.z).mul(&z2z2);
+        let s2 = other.y.mul(&self.z).mul(&z1z1);
+
+        let h = u2.sub(&u1);
+        let r = s2.sub(&s1);
+        if h.is_zero() {
+            if r.is_zero() {
+                return self.double();
+            }
+            return Self::INFINITY;
+        }
+        let hh = h.square();
+        let hhh = h.mul(&hh);
+        let v = u1.mul(&hh);
+
+        let x3 = r.square().sub(&hhh).sub(&v.double());
+        let y3 = r.mul(&v.sub(&x3)).sub(&s1.mul(&hhh));
+        let z3 = self.z.mul(&other.z).mul(&h);
+        Self {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+
+    fn affine_x(&self) -> Option<Fe384> {
+        if self.is_infinity() {
+            return None;
+        }
+        let z_inv = self.z.invert();
+        let z_inv2 = z_inv.square();
+        Some(self.x.mul(&z_inv2))
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    fn to_affine(self) -> Option<P384Point> {
+        if self.is_infinity() {
+            return None;
+        }
+        let z_inv = self.z.invert();
+        let z_inv2 = z_inv.square();
+        let z_inv3 = z_inv2.mul(&z_inv);
+        Some(P384Point {
+            x: self.x.mul(&z_inv2),
+            y: self.y.mul(&z_inv3),
+        })
+    }
+}
+
+/// Verifies an ECDSA-P384-SHA384 signature `(r, s)` over `message` against `pubkey`.
+#[inline(never)]
+pub fn ecdsa_p384_verify(
+    pubkey: &P384Point,
+    message: &[u8],
+    r_bytes: &[u8; 48],
+    s_bytes: &[u8; 48],
+) -> bool {
+    let Some(r) = Scalar384::from_be_bytes_nonzero(r_bytes) else {
+        return false;
+    };
+    let Some(s) = Scalar384::from_be_bytes_nonzero(s_bytes) else {
+        return false;
+    };
+
+    let digest = sha384_digest(message);
+    let e = Scalar384::from_be_bytes_reduced(&digest);
+
+    let w = s.invert();
+    let u1 = e.mul(&w);
+    let u2 = r.mul(&w);
+
+    let g = P384Point::generator();
+    let p1 = P384Jacobian::scalar_mul(&g, &u1);
+    let p2 = P384Jacobian::scalar_mul(pubkey, &u2);
+    let r_pt = p1.add_jacobian(&p2);
+
+    let Some(rx_fe) = r_pt.affine_x() else {
+        return false;
+    };
+    let rx_bytes = u384_to_be_bytes(&rx_fe.limbs);
+    let v = Scalar384::from_be_bytes_reduced(&rx_bytes);
+
+    let mut diff = 0u64;
+    let mut i = 0;
+    while i < 6 {
+        diff |= v.limbs[i] ^ r.limbs[i];
+        i += 1;
+    }
+    compiler_fence(Ordering::SeqCst);
+    diff == 0
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn p384_public_key_from_private(privkey_bytes: &[u8; 48]) -> Option<P384Point> {
+    let d = Scalar384::from_be_bytes_nonzero(privkey_bytes)?;
+    let g = P384Point::generator();
+    P384Jacobian::scalar_mul(&g, &d).to_affine()
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn ecdsa_p384_sign_deterministic(
+    privkey_bytes: &[u8; 48],
+    message: &[u8],
+) -> Option<[u8; 96]> {
+    let d = Scalar384::from_be_bytes_nonzero(privkey_bytes)?;
+    let msg_hash = sha384_digest(message);
+    let e = Scalar384::from_be_bytes_reduced(&msg_hash);
+
+    // Deterministic RFC 6979-style hedged nonce derivation: H(privkey || msg_hash || counter)
+    let mut seed_buf = [0u8; 97];
+    seed_buf[..48].copy_from_slice(privkey_bytes);
+    seed_buf[48..96].copy_from_slice(&msg_hash);
+
+    let g = P384Point::generator();
+    let mut counter: u8 = 1;
+    loop {
+        seed_buf[96] = counter;
+        let k_digest = sha384_digest(&seed_buf);
+        let k = Scalar384::from_be_bytes_reduced(&k_digest);
+        if !k.is_zero() {
+            let r_jac = P384Jacobian::scalar_mul(&g, &k);
+            if let Some(rx_fe) = r_jac.affine_x() {
+                let rx_bytes = u384_to_be_bytes(&rx_fe.limbs);
+                let r = Scalar384::from_be_bytes_reduced(&rx_bytes);
+                if !r.is_zero() {
+                    let k_inv = k.invert();
+                    let s = k_inv.mul(&e.add(&r.mul(&d)));
+                    if !s.is_zero() {
+                        let mut sig = [0u8; 96];
+                        sig[..48].copy_from_slice(&r.to_be_bytes());
+                        sig[48..96].copy_from_slice(&s.to_be_bytes());
+                        ct_zeroize(&mut seed_buf);
+                        return Some(sig);
+                    }
+                }
+            }
+        }
+        counter = counter.wrapping_add(1);
+        if counter == 0 {
+            ct_zeroize(&mut seed_buf);
+            return None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,10 +1638,48 @@ mod tests {
         assert_eq!(vole_subfield_eval(&u, &v, &delta, &mut w), 0);
         assert_eq!(w[0].limbs, [1, 0, 0, 0]);
     }
+
+    #[test]
+    fn test_sha384_nist_kat_and_p384_ecdsa_roundtrip() {
+        // NIST FIPS 180-4 SHA-384("abc") test vector
+        let digest = sha384_digest(b"abc");
+        let expected_abc: [u8; 48] = [
+            0xcb, 0x00, 0x75, 0x3f, 0x45, 0xa3, 0x5e, 0x8b,
+            0xb5, 0xa0, 0x3d, 0x69, 0x9a, 0xc6, 0x50, 0x07,
+            0x27, 0x2c, 0x32, 0xab, 0x0e, 0xde, 0xd1, 0x63,
+            0x1a, 0x8b, 0x60, 0x5a, 0x43, 0xff, 0x5b, 0xed,
+            0x80, 0x86, 0x07, 0x2b, 0xa1, 0xe7, 0xcc, 0x23,
+            0x58, 0xba, 0xec, 0xa1, 0x34, 0xc8, 0x25, 0xa7,
+        ];
+        assert_eq!(digest, expected_abc);
+
+        // ECDSA-P384 sign & verify roundtrip
+        let mut privkey = [0u8; 48];
+        privkey[47] = 0x2a;
+        privkey[0] = 0x19;
+        let Some(pubkey) = p384_public_key_from_private(&privkey) else {
+            return;
+        };
+        let msg = b"Nona AWS Nitro Enclave COSE_Sign1 Sig_structure test";
+        let Some(sig) = ecdsa_p384_sign_deterministic(&privkey, msg) else {
+            return;
+        };
+        let mut r = [0u8; 48];
+        let mut s = [0u8; 48];
+        r.copy_from_slice(&sig[..48]);
+        s.copy_from_slice(&sig[48..96]);
+        assert!(ecdsa_p384_verify(&pubkey, msg, &r, &s));
+
+        // Single-bit mutation in message or signature must fail closed
+        assert!(!ecdsa_p384_verify(&pubkey, b"tampered", &r, &s));
+        let mut bad_s = s;
+        bad_s[47] ^= 0x01;
+        assert!(!ecdsa_p384_verify(&pubkey, msg, &r, &bad_s));
+    }
 }
 
 #[cfg(test)]
-mod tests_f25 {
+mod adaptive_routing_tests {
     use super::*;
 
     #[test]

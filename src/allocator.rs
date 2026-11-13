@@ -44,6 +44,8 @@ pub fn bump_allocate(arena: &mut ArenaState, size: usize) -> (res: Result<usize,
                 &&& allocated_addr as int == old(arena).cursor as int
                 &&& final(arena).cursor as int == old(arena).cursor as int + (size as int)
                 &&& final(arena).cursor as int <= final(arena).base as int + final(arena).capacity as int
+                &&& (is_aligned_64(old(arena).cursor as int) && is_aligned_64(size as int))
+                    ==> is_aligned_64(final(arena).cursor as int)
             },
             Err(_) => {
                 &&& final(arena).cursor == old(arena).cursor
@@ -55,6 +57,14 @@ pub fn bump_allocate(arena: &mut ArenaState, size: usize) -> (res: Result<usize,
     if size <= rem {
         let old_cursor = arena.cursor;
         arena.cursor = arena.cursor + size;
+        proof {
+            if is_aligned_64(old_cursor as int) && is_aligned_64(size as int) {
+                assert((old_cursor as int) % 64 == 0);
+                assert((size as int) % 64 == 0);
+                assert(((old_cursor as int) + (size as int)) % 64 == 0) by(nonlinear_arith)
+                    requires (old_cursor as int) % 64 == 0, (size as int) % 64 == 0;
+            }
+        }
         Ok(old_cursor)
     } else {
         Err(())

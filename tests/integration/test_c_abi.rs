@@ -1,7 +1,4 @@
-// ============================================================================
-// NONA CONFIDENTIAL ENCLAVE INTEGRATION TEST: C-ABI BOUNDARY HARNESS
-// Deployment Profile: Pure #![no_std] Freestanding Binary (harness = false)
-// ============================================================================
+//! Integration tests for C-ABI boundary and zero-allocation execution.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), no_main)]

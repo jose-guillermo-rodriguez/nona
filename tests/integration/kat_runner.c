@@ -107,8 +107,8 @@ static void test_kat_point_doubling(void) {
     int32_t rc = nona_core_process(&state);
     assert(rc == 0);
 
-    assert_fe_eq(&state.accumulator, &SWU_2P_X, "[2]G affine X");
-    printf("  [+] KAT 2 Passed: 2G matches SEC 2 / RFC 6979 canonical coordinates.\n");
+    assert_fe_eq(&state.accumulator, &SWU_2P_X, "[2]P_SWU affine X");
+    printf("  [+] KAT 2 Passed: [2]P_SWU matches RFC 9380 SWU doubling coordinates.\n");
 }
 
 // KAT 3: Canonical secp256k1 Point Tripling ([3]G)
@@ -189,7 +189,14 @@ static void test_kat_commutative_dh_c_abi(void) {
     assert(rc == 0);
 
     assert(memcmp(blinded_ab, blinded_ba, 32) == 0);
-    printf("  [+] KAT 5 Passed: Two-party blinding strictly commutes through C-ABI.\n");
+
+    uint8_t match_idx[64] NONA_ALIGN(64) = {0xFF};
+    uint64_t card NONA_ALIGN(64) = 0;
+    rc = nona_phase2_intersect(blinded_ab, 32, blinded_ba, 32, 1, match_idx, 64, NONA_FLAG_FULL_PSI, &card);
+    assert(rc == 0);
+    assert(card == 1);
+    assert(match_idx[0] == 0 && match_idx[1] == 0 && match_idx[2] == 0 && match_idx[3] == 0);
+    printf("  [+] KAT 5 Passed: Two-party blinding commutes and intersects cleanly through C-ABI.\n");
 }
 
 int main(void) {

@@ -38,8 +38,12 @@ grep -rnEi "jacobian" docs/ SPECIFICATION.md README.md include/ || echo "  ✓ C
 
 echo ""
 echo "[AUDIT 3] Auditing TCB external_body / axiom counts..."
-CODE_EXTERNAL_COUNT=$(grep -rn "verifier::external_body" src/ | wc -l)
-echo "  [*] Code occurrences of verifier::external_body: $CODE_EXTERNAL_COUNT"
+CODE_EXTERNAL_COUNT=$(grep -rnE "^[[:space:]]*#\[verifier::external_body\]" src/ | wc -l | tr -d ' ')
+echo "  [*] Live #[verifier::external_body] attributes in src/: $CODE_EXTERNAL_COUNT"
+if [ "$CODE_EXTERNAL_COUNT" -ne 7 ]; then
+  echo "  [!] FAIL: Live TCB external_body count ($CODE_EXTERNAL_COUNT) diverges from SPECIFICATION.md §4.5.1 (7)."
+  exit 1
+fi
 grep -rnE "(external_body|axiom|unverified perimeter)" docs/TCB.md SPECIFICATION.md || true
 
 echo ""

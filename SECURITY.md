@@ -6,7 +6,7 @@
 **Project:** Nona Core Engine  
 **Classification:** Confidential Computing & OEM High-Assurance Cryptographic Substrate  
 **Target Environments:** AWS Nitro Enclaves (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), `#![no_std]` Bare-Metal  
-**Verification Level:** 122 Machine-Checked Verus SMT Verification Targets (0 Errors)
+**Verification Level:** 146 Machine-Checked Verus SMT Verification Targets (0 Errors)
 
 ---
 
@@ -29,7 +29,7 @@ The primary security objectives are:
 | :--- | :--- | :--- |
 | **Enclave Hardware (TEE)** | **Trusted** | Relies on hardware-enforced CPU isolation (AWS Nitro security chip / SEV-SNP / CCA). Enclave memory is hardware-isolated from the parent EC2 instance. |
 | **Enclave Firmware & Kernel** | **Trusted** | Stripped Linux kernel pinned to deterministic SHA-256 digest with immutable initramfs. |
-| **Nona Engine Core** | **Trusted** | `#![no_std]`, zero dynamic heap allocation, verified by 122 Verus SMT verification targets across core algebraic and memory invariants. |
+| **Nona Engine Core** | **Trusted** | `#![no_std]`, zero dynamic heap allocation, verified by 146 Verus SMT verification targets across core algebraic and memory invariants. |
 | **Parent EC2 Host OS** | **Untrusted** | Assumed fully compromised (malicious root access, rogue drivers, compromised kernel). The parent cannot read, write, or interrupt enclave memory directly. |
 | **Host Hypervisor** | **Untrusted** | Hypervisor has no direct memory snooping capability into the Nitro Enclave memory space. All I/O is restricted to `AF_VSOCK`. |
 | **Network & Transit** | **Untrusted** | All data entering or exiting the enclave across `AF_VSOCK` must be authenticated and decrypted within the enclave boundary. |
@@ -56,7 +56,7 @@ Even under hostile physical memory tap or unexpected instance termination:
 
 ## 3. Cryptographic Invariants & Verification Guarantees
 
-- **SMT Arithmetic Boundary Theorems:** 122 machine-checked Verus SMT targets (46 mathematical lemmas and 76 verified contracts) verify no integer overflow, underflow, or memory out-of-bounds indexing occurs across core cryptographic paths.
+- **SMT Arithmetic Boundary Theorems:** 146 machine-checked Verus SMT targets (50 mathematical lemmas and 96 verified executive & boundary contracts) verify no integer overflow, underflow, or memory out-of-bounds indexing occurs across core cryptographic paths.
 - **Stack Budget:** Single-frame context size is bounded at $\le 2{,}560$ bytes. Overall machine stack frame ceiling is strictly bounded at $\le 4{,}096\text{ bytes}$ (peak measured frame: 3,584 bytes in `nona_phase1_blind`), safeguarded by stack-pointer assertions and recommended `-C probe-stack` compiler options.
 - **Zero Dynamic Symbol Linkage:** Enclave release binaries disallow dynamic linking to heap allocation symbols:
   $$\text{count}(\text{symbols} \in \{\text{malloc}, \text{free}, \text{realloc}, \text{calloc}, \text{\_\_rust\_alloc}\}) = 0$$

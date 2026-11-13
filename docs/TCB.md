@@ -31,11 +31,12 @@ Nona cryptographic core eliminates operating system and runtime dependencies:
 
 Nona formal proofs are machine-checked via Verus using Z3 with an explicit resource limit budget (rlimit = 1,000,000):
 
-- src/psi.rs (92 SMT Targets: 30 Lemmas + 62 Contracts): Solinas reduction, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, field arithmetic, non-overflow (total 122 global SMT targets: 46 inductive lemmas + 76 verified contracts)
+- src/psi.rs (93 SMT Targets: 31 Lemmas + 62 Contracts): Solinas reduction, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, field arithmetic, non-overflow (total 146 global SMT targets: 50 inductive lemmas + 96 verified executive & boundary contracts)
 - src/obfuscation.rs (22 SMT Targets: 14 Lemmas + 8 Contracts): 4-round Feistel bijection, non-identity permutations, key diffusion (VERIF-01)
-- src/normalization.rs (4 SMT Targets: 4 Contracts): Monomorphic 64-byte bounded transformations, memory safety
-- src/allocator.rs (1 SMT Target: 1 Contract): Pointer alignment invariants and static arena safety
+- src/normalization.rs (9 SMT Targets: 9 Contract/Loop Targets): Monomorphic 64-byte bounded transformations, output delimiter elimination & zero-padding completeness
+- src/allocator.rs (2 SMT Targets: 2 Contract Targets): 64-byte pointer alignment preservation invariants and static arena safety
 - src/crypto.rs (3 SMT Targets: 2 Lemmas + 1 Contract): Ghost ChannelToken sequence monotonicity and branchless borrow-bit adaptive VOLE routing circuit (VERIF-03)
+- src/enclave_boundaries.rs (17 SMT Targets: 3 Lemmas + 14 Boundary Contracts): AWS Nitro `/dev/nsm` IOCTL/CBOR framing, monotonic enclave session operation ceiling, 64-byte vsock wire framing bijectivity, `CLOCK_MONOTONIC` & `recv_exact` syscall models, FFI spatial disjointness, 128-byte ring pre-flight framing, and branchless exception cursor advancement (ENCL-12)
 
 ### High-Assurance Runtime Cryptographic Boundary (`src/crypto.rs`) [VERIF-03]
 Cryptographic components in `src/crypto.rs` are partitioned between the machine-checked core and the runtime perimeter:
@@ -43,7 +44,7 @@ Cryptographic components in `src/crypto.rs` are partitioned between the machine-
 - **High-Assurance Runtime Perimeter (Tier 3):** RFC 9380 Simplified SWU hash-to-curve, Montgomery batch coordinate inversion, affine point decompression ($y = \sqrt{x^3 + 7} \pmod p$), SIMD normalization kernels (AVX-512, AVX2, NEON), C-ABI FFI entry points (`nona_phase1_blind`, `nona_phase2_reblind`), SHA-512, and `Scalar` group arithmetic modulo $q$ (including `vole_subfield_eval`) are explicitly scoped out of the formal SMT verification perimeter. Non-linear degree-2 scalar reduction modulo the non-Solinas group order $q$ is governed under the High-Assurance Runtime Perimeter, verified empirically via differential oracle test suites (`tests/integration/test_field_differential.rs`), boundary sweeps (`tests/integration/test_crypto_boundaries.rs`), and external dudect timing neutrality audits.
 
 ### Live Trusted Computing Base (`#[verifier::external_body]`) Sites
-Automated SMT solvers operate within bounded quantifier-free and linear integer arithmetic theories. Due to fundamental SMT decidability limits on non-linear multivariate integer polynomials and cross-radix bit extraction, exactly 4 bounded primitive sites in `src/psi.rs` bypass machine induction and form part of the live TCB (as specified in `SPECIFICATION.md §4.5.1`):
+Automated SMT solvers operate within bounded quantifier-free and linear integer arithmetic theories. Due to fundamental SMT decidability limits on non-linear multivariate integer polynomials, cross-radix bit extraction, and external OS/hypervisor kernel syscalls, exactly 7 bounded boundary sites (4 arithmetic primitives in `src/psi.rs` and 3 OS/hardware syscall interfaces in `src/enclave_boundaries.rs`) bypass machine induction and form part of the live TCB (as specified in `SPECIFICATION.md §4.5.1`):
 
 | Target Identifier | Category | Preconditions (`requires`) & Postconditions (`ensures`) | Soundness Rationale |
 |---|---|---|---|
@@ -51,6 +52,9 @@ Automated SMT solvers operate within bounded quantifier-free and linear integer 
 | `add_nocarry` (`src/psi.rs:3197`) | Runtime Primitive | **Requires:** None<br>**Ensures:** `res.0 in {0,1} && res.0 * 2^256 + res.1.to_nat() == a.to_nat() + b.to_nat()` | 256-bit unrolled multi-limb addition with carry. Bypasses multi-word ADC carry-chain modeling. |
 | `sub_noborrow` (`src/psi.rs:3229`) | Runtime Primitive | **Requires:** None<br>**Ensures:** `res.0 in {0,1} && (a >= b ==> res.0==0 && res.1==a-b) && (a < b ==> res.0==1 && res.1==a+2^256-b)` | 256-bit unrolled multi-limb subtraction with borrow. SMT borrow-propagation semantics isolated at boundary. |
 | `FieldElement::mul` (`src/psi.rs:3676`) | Runtime Primitive | **Requires:** `self.is_valid() && other.is_valid()`<br>**Ensures:** `res.is_valid() && res.to_nat() == (self.to_nat() * other.to_nat()) % p` | 256-bit modular multiplication (512-bit product reduced mod p). Non-linear degree-2 reduction treated as axiomatic computation. Audited under VERIF-02: dead internal proof assertions stripped to guarantee an honest SMT trust boundary. |
+| `ffi_nsm_ioctl_raw_contract` (`src/enclave_boundaries.rs:47`) | Hardware Boundary | **Requires:** `ioctl_cmd == SPEC_NSM_IOCTL_RAW && msg.wf(512, 12288)`<br>**Ensures:** `res.0 == 0 ==> (0 < res.1 <= msg.response.len) && (res.0 != 0 ==> res.1 == 0)` | Linux `/dev/nsm` `ioctl(NSM_IOCTL_RAW)` kernel/hypervisor boundary contract (ENCL-12). |
+| `ffi_clock_monotonic_ns` (`src/enclave_boundaries.rs:196`) | OS Syscall Boundary | **Requires:** None<br>**Ensures:** `now_ns >= prev_ns` | POSIX `clock_gettime(CLOCK_MONOTONIC)` monotonic interval boundary model (ENCL-12). |
+| `ffi_vsock_recv_exact` (`src/enclave_boundaries.rs:205`) | OS Syscall Boundary | **Requires:** `expected_len <= buf_cap`<br>**Ensures:** `Ok(n) ==> n == expected_len` | `AF_VSOCK` / `AF_UNIX` exact byte stream framing boundary model (ENCL-12). |
 
 ### Unproven Assumptions & Axiomatic Boundary
 1. Arithmetic Semantics: Mathematical axioms of integer arithmetic and prime fields are assumed sound.

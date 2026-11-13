@@ -2,12 +2,13 @@
 //! Operates with zero dynamic allocations (#![no_std]) using cache-aligned stack buffers.
 
 use crate::attestation::{
-    derive_compressed_public_key, query_hardware_attestation, AttestationDocumentBuffer,
+    derive_compressed_public_key, fill_nsm_entropy_or_abort, is_nsm_available, query_hardware_attestation_with_nonce,
+    AttestationDocumentBuffer, ATTESTATION_MAX_DOC_SIZE, NONA_ERR_ATTEST_OVERFLOW,
     SECP256K1_PUBKEY_COMPRESSED_SIZE,
 };
 use crate::crypto::{ct_zeroize, sha512_digest};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 pub const AF_VSOCK: i32 = 40;
 pub const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
@@ -25,12 +26,24 @@ pub const CMD_ATTEST: u16 = 0x0004;
 pub const FLAG_USE_SESSION_KEY: u32 = 0x0001;
 pub const MAX_PAYLOAD_SIZE: usize = 16384;
 
+/// Opaque wire status returned across vsock on any parsing, framing, or verification failure
+/// to suppress internal diagnostic oracles.
+pub const NONA_WIRE_ERR_OPAQUE: i32 = -1;
+/// Minimum per-frame wire response floor (250 microseconds) eliminating early-exit timing side channels.
+pub const WIRE_FRAME_FLOOR_NS: u64 = 250_000;
+
+/// Maximum cryptographic operations permitted per ephemeral enclave session key
+/// enforced via a monotonic counter independent of hypervisor clocks (FR-36-TIMEWARP).
+pub const MAX_SESSION_OPS: u64 = 1_000_000;
+
 const SESSION_STATE_UNINIT: u8 = 0;
 const SESSION_STATE_INITIALIZING: u8 = 1;
 const SESSION_STATE_READY: u8 = 2;
 
 struct EnclaveSessionKey {
     state: AtomicU8,
+    epoch: AtomicU64,
+    op_count: AtomicU64,
     privkey: core::cell::UnsafeCell<[u8; 32]>,
     pubkey: core::cell::UnsafeCell<[u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]>,
 }
@@ -39,6 +52,8 @@ unsafe impl Sync for EnclaveSessionKey {}
 
 static SESSION_KEY: EnclaveSessionKey = EnclaveSessionKey {
     state: AtomicU8::new(SESSION_STATE_UNINIT),
+    epoch: AtomicU64::new(0),
+    op_count: AtomicU64::new(0),
     privkey: core::cell::UnsafeCell::new([0u8; 32]),
     pubkey: core::cell::UnsafeCell::new([0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]),
 };
@@ -265,196 +280,89 @@ impl Drop for AlignedKeyBuffer {
     }
 }
 
-// ============================================================================
 // Hardware CSPRNG for #![no_std] Confidential Enclave
-// Compliant with NIST SP 800-90A/B via Intel/AMD RDRAND and RDSEED
-// ============================================================================
-
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn is_rdrand_supported() -> bool {
-    let res = core::arch::x86_64::__cpuid(1);
-    (res.ecx & (1 << 30)) != 0
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn is_rdseed_supported() -> bool {
-    let max_leaf = core::arch::x86_64::__cpuid(0).eax;
-    if max_leaf >= 7 {
-        let res = core::arch::x86_64::__cpuid_count(7, 0);
-        (res.ebx & (1 << 18)) != 0
-    } else {
-        false
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "rdrand")]
-unsafe fn hardware_rdrand64(val: &mut u64) -> bool {
-    for _ in 0..32 {
-        if core::arch::x86_64::_rdrand64_step(val) == 1 {
-            return true;
-        }
-        core::hint::spin_loop();
-    }
-    false
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "rdseed")]
-unsafe fn hardware_rdseed64(val: &mut u64) -> bool {
-    for _ in 0..16 {
-        if core::arch::x86_64::_rdseed64_step(val) == 1 {
-            return true;
-        }
-        core::hint::spin_loop();
-    }
-    false
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(clippy::chunks_exact_to_as_chunks)]
-unsafe fn fill_hardware_entropy_x86(dest: &mut [u8]) -> bool {
-    let use_rdseed = is_rdseed_supported();
-    let mut chunks = dest.chunks_exact_mut(8);
-    for chunk in chunks.by_ref() {
-        let mut val = 0u64;
-        let mut ok = false;
-        if (use_rdseed && hardware_rdseed64(&mut val)) || hardware_rdrand64(&mut val) {
-            ok = true;
-        }
-        if !ok {
-            return false;
-        }
-        chunk.copy_from_slice(&val.to_ne_bytes());
-    }
-    let rem = chunks.into_remainder();
-    if !rem.is_empty() {
-        let mut val = 0u64;
-        let mut ok = false;
-        if (use_rdseed && hardware_rdseed64(&mut val)) || hardware_rdrand64(&mut val) {
-            ok = true;
-        }
-        if !ok {
-            return false;
-        }
-        let bytes = val.to_ne_bytes();
-        rem.copy_from_slice(&bytes[..rem.len()]);
-    }
-    true
-}
-
-#[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
-fn fill_hardware_entropy_aarch64(dest: &mut [u8]) -> bool {
-    let mut chunks = dest.chunks_exact_mut(8);
-    for chunk in chunks.by_ref() {
-        let mut val = 0u64;
-        let mut success = false;
-        for _ in 0..32 {
-            let ok: usize;
-            unsafe {
-                core::arch::asm!(
-                    "mrs {val}, s3_3_c2_c4_0",
-                    "cset {ok}, ne",
-                    val = out(reg) val,
-                    ok = out(reg) ok,
-                    options(nostack)
-                );
-            }
-            if ok != 0 {
-                success = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        if !success {
-            return false;
-        }
-        chunk.copy_from_slice(&val.to_ne_bytes());
-    }
-    let rem = chunks.into_remainder();
-    if !rem.is_empty() {
-        let mut val = 0u64;
-        let mut success = false;
-        for _ in 0..32 {
-            let ok: usize;
-            unsafe {
-                core::arch::asm!(
-                    "mrs {val}, s3_3_c2_c4_0",
-                    "cset {ok}, ne",
-                    val = out(reg) val,
-                    ok = out(reg) ok,
-                    options(nostack)
-                );
-            }
-            if ok != 0 {
-                success = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        if !success {
-            return false;
-        }
-        let bytes = val.to_ne_bytes();
-        rem.copy_from_slice(&bytes[..rem.len()]);
-    }
-    true
-}
-
-#[inline]
-pub fn fill_secure_entropy(#[allow(unused_variables)] dest: &mut [u8]) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        extern "C" {
-            fn getentropy(buf: *mut core::ffi::c_void, buflen: usize) -> core::ffi::c_int;
-        }
-        for chunk in dest.chunks_mut(256) {
-            let ret = unsafe { getentropy(chunk.as_mut_ptr().cast(), chunk.len()) };
-            if ret != 0 {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-    {
-        if is_rdrand_supported() {
-            return unsafe { fill_hardware_entropy_x86(dest) };
-        }
-    }
-
-    #[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
-    {
-        return fill_hardware_entropy_aarch64(dest);
-    }
-
-    #[allow(unreachable_code)]
-    false
-}
+// Seeded exclusively via direct /dev/nsm GetRandom IOCTL requests with fail-stop abort.
 
 /// Satisfies enclave lifecycle reboot and testing reset semantics.
 /// Securely decontaminates the cached session keypair using constant-time zeroization.
 /// Gated to std/test environments to ensure physical exclusion from bare-metal #![no_std] production binaries.
-#[cfg(any(test, feature = "std"))]
-pub fn reset_session_key() {
+/// Unconditionally purges the enclave session keypair in constant time.
+/// Invoked during fatal aborts and crash signal traps to prevent memory remanence.
+pub fn purge_session_key_unconditional() {
     unsafe {
         ct_zeroize(&mut *SESSION_KEY.privkey.get());
         ct_zeroize(&mut *SESSION_KEY.pubkey.get());
     }
+    SESSION_KEY.op_count.store(0, Ordering::SeqCst);
     SESSION_KEY
         .state
-        .store(SESSION_STATE_UNINIT, Ordering::Release);
+        .store(SESSION_STATE_UNINIT, Ordering::SeqCst);
 }
 
-pub fn get_or_create_session_key() -> ([u8; 32], [u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]) {
+#[cfg(any(test, feature = "std"))]
+pub fn reset_session_key() {
+    purge_session_key_unconditional();
+}
+
+#[cfg(not(target_os = "none"))]
+extern "C" fn enclave_fatal_signal_handler(_sig: libc::c_int) {
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    purge_session_key_unconditional();
+    crate::exception::decontaminate();
+    unsafe {
+        libc::_exit(1);
+    }
+}
+
+/// Hardens the enclave process against host memory core dumps, ptrace inspection,
+/// swap leakage, and unhandled crash signal disclosure.
+pub fn harden_enclave_process() {
+    #[cfg(not(target_os = "none"))]
+    unsafe {
+        let zero_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let _ = libc::setrlimit(libc::RLIMIT_CORE, &raw const zero_limit);
+
+        #[cfg(target_os = "linux")]
+        {
+            const PR_SET_DUMPABLE: libc::c_int = 4;
+            const MADV_DONTDUMP: libc::c_int = 16;
+            let _ = libc::prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+            let _ = libc::madvise(
+                (&raw const SESSION_KEY).cast::<libc::c_void>().cast_mut(),
+                size_of::<EnclaveSessionKey>(),
+                MADV_DONTDUMP,
+            );
+            let _ = libc::madvise(
+                (&raw const STAGING_POOL).cast::<libc::c_void>().cast_mut(),
+                size_of::<StagingBufferPool>(),
+                MADV_DONTDUMP,
+            );
+        }
+
+        #[cfg(feature = "host-defense")]
+        {
+            let _ = libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        }
+
+        let handler = enclave_fatal_signal_handler as *const () as libc::sighandler_t;
+        let _ = libc::signal(libc::SIGINT, handler);
+        let _ = libc::signal(libc::SIGTERM, handler);
+        let _ = libc::signal(libc::SIGSEGV, handler);
+        let _ = libc::signal(libc::SIGABRT, handler);
+        let _ = libc::signal(libc::SIGBUS, handler);
+        let _ = libc::signal(libc::SIGILL, handler);
+        let _ = libc::signal(libc::SIGFPE, handler);
+    }
+}
+
+#[inline(never)]
+fn ensure_session_key_initialized() {
     loop {
         match SESSION_KEY.state.load(Ordering::Acquire) {
-            SESSION_STATE_READY => {
-                return unsafe { (*SESSION_KEY.privkey.get(), *SESSION_KEY.pubkey.get()) };
-            }
+            SESSION_STATE_READY => return,
             SESSION_STATE_UNINIT => {
                 if SESSION_KEY
                     .state
@@ -466,38 +374,77 @@ pub fn get_or_create_session_key() -> ([u8; 32], [u8; SECP256K1_PUBKEY_COMPRESSE
                     )
                     .is_ok()
                 {
-                    let mut privkey = [0u8; 32];
-                    if !fill_secure_entropy(&mut privkey) {
-                        ct_zeroize(&mut privkey);
+                    let mut privkey = AlignedKeyBuffer { data: [0u8; 32] };
+                    fill_nsm_entropy_or_abort(&mut privkey.data);
+
+                    let mut pubkey = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
+                    if derive_compressed_public_key(&privkey.data, &mut pubkey) != 0 {
+                        ct_zeroize(&mut privkey.data);
                         SESSION_KEY
                             .state
                             .store(SESSION_STATE_UNINIT, Ordering::Release);
-                        continue;
+                        crate::exception::zeroize_and_abort(
+                            crate::gatekeeper::NONA_ERR_INTERNAL_PANIC,
+                        );
                     }
 
-                    let mut pubkey = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
-                    if derive_compressed_public_key(&privkey, &mut pubkey) == 0 {
-                        unsafe {
-                            *SESSION_KEY.privkey.get() = privkey;
-                            *SESSION_KEY.pubkey.get() = pubkey;
-                        }
-                        SESSION_KEY
-                            .state
-                            .store(SESSION_STATE_READY, Ordering::Release);
-                        let ret_priv = privkey;
-                        ct_zeroize(&mut privkey);
-                        return (ret_priv, pubkey);
+                    unsafe {
+                        (*SESSION_KEY.privkey.get()).copy_from_slice(&privkey.data);
+                        (*SESSION_KEY.pubkey.get()).copy_from_slice(&pubkey);
                     }
-                    ct_zeroize(&mut privkey);
+                    ct_zeroize(&mut privkey.data);
+                    SESSION_KEY.op_count.store(0, Ordering::SeqCst);
+                    SESSION_KEY.epoch.fetch_add(1, Ordering::SeqCst);
                     SESSION_KEY
                         .state
-                        .store(SESSION_STATE_UNINIT, Ordering::Release);
+                        .store(SESSION_STATE_READY, Ordering::Release);
+                    return;
                 }
             }
             _ => {
                 core::hint::spin_loop();
             }
         }
+    }
+}
+
+/// Advances the enclave's monotonic session operation counter using `ChannelToken`,
+/// failing closed if `MAX_SESSION_OPS` is reached without relying on hypervisor clocks (FR-36-TIMEWARP).
+#[inline(never)]
+fn advance_session_op_counter() -> Result<u64, i32> {
+    let mut prev = SESSION_KEY.op_count.load(Ordering::Acquire);
+    loop {
+        if prev >= MAX_SESSION_OPS {
+            purge_session_key_unconditional();
+            return Err(-1);
+        }
+        let next_seq = prev.saturating_add(1);
+        match SESSION_KEY.op_count.compare_exchange_weak(
+            prev,
+            next_seq,
+            Ordering::SeqCst,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(next_seq),
+            Err(actual) => prev = actual,
+        }
+    }
+}
+
+/// Initializes (if needed) and returns only the compressed 33-byte session public key.
+/// Never copies the private scalar onto the caller's stack.
+#[inline(never)]
+pub fn get_or_create_session_pubkey() -> [u8; SECP256K1_PUBKEY_COMPRESSED_SIZE] {
+    ensure_session_key_initialized();
+    unsafe { *SESSION_KEY.pubkey.get() }
+}
+
+/// Copies the enclave session private scalar directly into a zeroize-on-drop `AlignedKeyBuffer`.
+#[inline(never)]
+pub fn load_session_privkey_into(dest: &mut AlignedKeyBuffer) {
+    ensure_session_key_initialized();
+    unsafe {
+        dest.data.copy_from_slice(&*SESSION_KEY.privkey.get());
     }
 }
 
@@ -546,19 +493,16 @@ pub fn dispatch_frame_with_slot(
         }
         CMD_BLIND_PHASE1 => {
             let use_session_key = (req_header.flags & FLAG_USE_SESSION_KEY) != 0;
-            let mut session_k = [0u8; 32];
-            let (key_slice, elements_slice): (&[u8], &[u8]) = if use_session_key {
-                let (privkey, _) = get_or_create_session_key();
-                session_k.copy_from_slice(&privkey);
+            let elements_slice: &[u8] = if use_session_key {
                 if payload.is_empty() || !payload.len().is_multiple_of(32) {
                     return (-3, 0);
                 }
-                (&session_k[..], payload)
+                payload
             } else {
                 if payload.len() < 64 || !payload.len().is_multiple_of(32) {
                     return (-3, 0);
                 }
-                (&payload[0..32], &payload[32..])
+                &payload[32..]
             };
 
             let n_elements = elements_slice.len() / 32;
@@ -576,7 +520,14 @@ pub fn dispatch_frame_with_slot(
             }
 
             let mut aligned_key = AlignedKeyBuffer { data: [0u8; 32] };
-            aligned_key.data.copy_from_slice(key_slice);
+            if use_session_key {
+                if advance_session_op_counter().is_err() {
+                    return (-1, 0);
+                }
+                load_session_privkey_into(&mut aligned_key);
+            } else {
+                aligned_key.data.copy_from_slice(&payload[0..32]);
+            }
 
             scratch_buffer.data[..elements_len].copy_from_slice(elements_slice);
 
@@ -591,7 +542,7 @@ pub fn dispatch_frame_with_slot(
                 )
             };
 
-            ct_zeroize(&mut session_k);
+            ct_zeroize(&mut aligned_key.data);
             scratch_buffer.purge();
 
             let out_len = if status == 0 { elements_len as u32 } else { 0 };
@@ -599,36 +550,43 @@ pub fn dispatch_frame_with_slot(
             (status, out_len)
         }
         CMD_ATTEST => {
-            let mut privkey = [0u8; 32];
-            let mut pubkey = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
-
-            if payload.len() >= 32 {
-                privkey.copy_from_slice(&payload[..32]);
-                if derive_compressed_public_key(&privkey, &mut pubkey) != 0 {
-                    return (-1, 0);
-                }
+            let client_nonce: Option<&[u8]> = if payload.is_empty() {
+                None
+            } else if payload.len() >= 16 && payload.len() <= 64 {
+                Some(payload)
             } else {
-                let (k, q) = get_or_create_session_key();
-                privkey.copy_from_slice(&k);
-                pubkey.copy_from_slice(&q);
+                return (-3, 0);
+            };
+            if !is_nsm_available() {
+                return (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0);
             }
-
+            // Bind hypervisor attestation strictly to the internal enclave session public key.
+            // Private scalar never enters this frame.
+            let pubkey = get_or_create_session_pubkey();
+            if advance_session_op_counter().is_err() {
+                return (-1, 0);
+            }
             let user_data_digest = sha512_digest(&pubkey);
 
-            let status = unsafe { query_hardware_attestation(&user_data_digest, attestation_doc) };
+            let status = unsafe {
+                query_hardware_attestation_with_nonce(&user_data_digest, client_nonce, attestation_doc)
+            };
 
-            let out_len = if status == 0 {
+            let (status, out_len) = if status == 0 {
                 let total_needed = SECP256K1_PUBKEY_COMPRESSED_SIZE + attestation_doc.actual_len;
-                let copy_len = core::cmp::min(total_needed, resp_payload.len());
-                if copy_len >= SECP256K1_PUBKEY_COMPRESSED_SIZE {
+                if total_needed > resp_payload.len()
+                    || attestation_doc.actual_len == 0
+                    || attestation_doc.actual_len > ATTESTATION_MAX_DOC_SIZE
+                {
+                    (NONA_ERR_ATTEST_OVERFLOW, 0)
+                } else {
                     resp_payload[..SECP256K1_PUBKEY_COMPRESSED_SIZE].copy_from_slice(&pubkey);
-                    let doc_copy = copy_len - SECP256K1_PUBKEY_COMPRESSED_SIZE;
-                    resp_payload[SECP256K1_PUBKEY_COMPRESSED_SIZE..copy_len]
-                        .copy_from_slice(&attestation_doc.data[..doc_copy]);
+                    resp_payload[SECP256K1_PUBKEY_COMPRESSED_SIZE..total_needed]
+                        .copy_from_slice(&attestation_doc.data[..attestation_doc.actual_len]);
+                    (0, total_needed as u32)
                 }
-                copy_len as u32
             } else {
-                0
+                (status, 0)
             };
 
             attestation_doc.purge();
@@ -722,6 +680,41 @@ pub unsafe fn handle_enclave_client(client_fd: libc::c_int) {
 }
 
 #[inline(never)]
+unsafe fn monotonic_now_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) != 0 {
+        crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
+    }
+    let sec = u64::try_from(ts.tv_sec).unwrap_or(0);
+    let nsec = u64::try_from(ts.tv_nsec).unwrap_or(0);
+    sec.saturating_mul(1_000_000_000).saturating_add(nsec)
+}
+
+#[inline(never)]
+unsafe fn enforce_wire_frame_floor(start_ns: u64) {
+    if start_ns == 0 {
+        return;
+    }
+    let now_ns = monotonic_now_ns();
+    let elapsed = now_ns.saturating_sub(start_ns);
+    if elapsed < WIRE_FRAME_FLOOR_NS {
+        let rem = WIRE_FRAME_FLOOR_NS - elapsed;
+        let req = libc::timespec {
+            tv_sec: (rem / 1_000_000_000).cast_signed(),
+            tv_nsec: (rem % 1_000_000_000).cast_signed(),
+        };
+        let mut leftover = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let _ = libc::nanosleep(&raw const req, &raw mut leftover);
+    }
+}
+
+#[inline(never)]
 #[allow(clippy::cast_possible_truncation)]
 pub unsafe fn handle_enclave_client_with_staging(
     client_fd: libc::c_int,
@@ -738,18 +731,26 @@ pub unsafe fn handle_enclave_client_with_staging(
         {
             break;
         }
+        let frame_start_ns = monotonic_now_ns();
         let req_header = EnclaveRequestHeader::from_wire_bytes(&req_wire);
 
         let plen = req_header.payload_len as usize;
-        if plen > MAX_PAYLOAD_SIZE {
+        if req_header.magic != NONA_VSOCK_MAGIC
+            || req_header.version != NONA_VSOCK_VERSION
+            || plen > MAX_PAYLOAD_SIZE
+        {
+            slot.purge();
+            enforce_wire_frame_floor(frame_start_ns);
             break;
         }
 
         if plen > 0 && recv_exact(client_fd, slot.in_buffer.data.as_mut_ptr(), plen).is_err() {
+            slot.purge();
+            enforce_wire_frame_floor(frame_start_ns);
             break;
         }
 
-        let (status, resp_len) = dispatch_frame_with_slot(
+        let (raw_status, raw_resp_len) = dispatch_frame_with_slot(
             &req_header,
             &slot.in_buffer.data[..plen],
             &mut slot.out_buffer.data,
@@ -757,11 +758,23 @@ pub unsafe fn handle_enclave_client_with_staging(
             &mut slot.attestation_doc,
         );
 
+        let (wire_status, wire_resp_len) = if raw_status == 0 {
+            (0, raw_resp_len)
+        } else if raw_status == crate::attestation::NONA_ERR_NSM_UNAVAILABLE {
+            slot.purge();
+            (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0)
+        } else {
+            slot.purge();
+            (NONA_WIRE_ERR_OPAQUE, 0)
+        };
+
+        enforce_wire_frame_floor(frame_start_ns);
+
         let resp_header = EnclaveResponseHeader {
             magic: NONA_VSOCK_MAGIC,
             version: NONA_VSOCK_VERSION,
-            status,
-            payload_len: resp_len,
+            status: wire_status,
+            payload_len: wire_resp_len,
             reserved: [0u8; 20],
         };
 
@@ -775,13 +788,23 @@ pub unsafe fn handle_enclave_client_with_staging(
         {
             break;
         }
-        if resp_len > 0
-            && send_exact(client_fd, slot.out_buffer.data.as_ptr(), resp_len as usize).is_err()
+        if wire_resp_len > 0
+            && send_exact(
+                client_fd,
+                slot.out_buffer.data.as_ptr(),
+                wire_resp_len as usize,
+            )
+            .is_err()
         {
             break;
         }
 
         slot.purge();
+
+        // Fail-closed session termination: immediately close connection on any protocol/verification error
+        if wire_status != 0 && wire_status != crate::attestation::NONA_ERR_NSM_UNAVAILABLE {
+            break;
+        }
     }
 
     slot.purge();
@@ -878,6 +901,7 @@ pub unsafe fn run_unix_server(path_bytes_null_term: &[u8]) -> i32 {
     }
 }
 
+#[cfg(feature = "std")]
 pub unsafe fn run_dual_server(port: u32, unix_path: &[u8]) -> i32 {
     let vsock_res = run_vsock_server(port);
     if vsock_res != 0 {

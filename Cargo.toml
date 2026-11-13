@@ -1,6 +1,6 @@
 [package]
 name = "nona-core"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["Jose Guillermo Rodriguez <jose-guillermo-rodriguez@users.noreply.github.com>"]
 license = "MIT OR Apache-2.0"
@@ -150,4 +150,9 @@ required-features = ["std"]
 [[test]]
 name = "test_field_differential"
 path = "tests/integration/test_field_differential.rs"
+required-features = ["std"]
+
+[[test]]
+name = "test_attestation_negative"
+path = "tests/integration/test_attestation_negative.rs"
 required-features = ["std"]
