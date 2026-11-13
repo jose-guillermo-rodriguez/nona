@@ -4,14 +4,14 @@
   "target_architecture": "aarch64-unknown-linux-musl",
   "container_platform": "linux/arm64",
   "source_date_epoch": 1700000000,
-  "binary_size_bytes": 397264,
+  "binary_size_bytes": 397256,
   "max_memory_ceiling_mb": 16,
   "vsock_port": 5005,
   "measurements": {
     "hash_algorithm": "SHA-384",
-    "PCR0": "71101f37fa06ce4e399cc70cd939cdafff50b3968a49cf703ff8a7e23215602e1f69704245afcfd238a38c62d0d4cc36",
+    "PCR0": "5d33013a8ee477bc01d796870838647e48b77f4dd2e2c8a4be9c27204b3a625ed4f67cdab1a43a7aee579769a699bf22",
     "PCR1": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
-    "PCR2": "9d70cdbd0547b27fd48cd70b72552a21b23923ac6cb86ac756ff5940529bca57b28e191d9f0e916f6d1b74783a12bf3e"
+    "PCR2": "2b6b0787591ec97b0239c6c9b861ebedcd51af9914fcc564226db4bd3b36a3ee38c1c813e2cee7cc1ff009b6e5ecf5a3"
   },
   "attestation_binding": {
     "curve": "secp256k1",

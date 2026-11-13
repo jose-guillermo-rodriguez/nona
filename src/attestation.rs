@@ -201,18 +201,69 @@ pub fn parse_nsm_get_random_response_into(resp_buf: &[u8], out: &mut [u8]) -> Re
     if resp_buf.len() < 21 {
         return Err(NONA_ERR_NSM_IOCTL_FAILED);
     }
-    if resp_buf[0] != 0xa1
+    let is_indef_map = resp_buf[0] == 0xbf && resp_buf[11] == 0xbf;
+    let is_def_map = resp_buf[0] == 0xa1 && resp_buf[11] == 0xa1;
+    if (!is_indef_map && !is_def_map)
         || resp_buf[1] != 0x69
         || &resp_buf[2..11] != b"GetRandom"
-        || resp_buf[11] != 0xa1
         || resp_buf[12] != 0x66
         || &resp_buf[13..19] != b"random"
     {
         return Err(NONA_ERR_NSM_IOCTL_FAILED);
     }
 
+    let expected_map_breaks = if is_indef_map { 2usize } else { 0usize };
     let major = resp_buf[19] >> 5;
     let addl = resp_buf[19] & 0x1f;
+
+    if major == 4 && addl == 31 {
+        let mut cursor = 20usize;
+        let mut item_count = 0usize;
+        let mut written = 0usize;
+        loop {
+            if cursor >= resp_buf.len() {
+                return Err(NONA_ERR_NSM_IOCTL_FAILED);
+            }
+            let hdr = resp_buf[cursor];
+            if hdr == 0xff {
+                cursor += 1;
+                break;
+            }
+            let elem_major = hdr >> 5;
+            let elem_addl = hdr & 0x1f;
+            if elem_major != 0 {
+                return Err(NONA_ERR_NSM_IOCTL_FAILED);
+            }
+            let val = match elem_addl {
+                0..=23 => {
+                    cursor += 1;
+                    elem_addl
+                }
+                24 => {
+                    if cursor + 1 >= resp_buf.len() {
+                        return Err(NONA_ERR_NSM_IOCTL_FAILED);
+                    }
+                    let v = resp_buf[cursor + 1];
+                    cursor += 2;
+                    v
+                }
+                _ => return Err(NONA_ERR_NSM_IOCTL_FAILED),
+            };
+            if written < out.len() {
+                out[written] = val;
+                written += 1;
+            }
+            item_count += 1;
+        }
+        if item_count == 0
+            || cursor.saturating_add(expected_map_breaks) != resp_buf.len()
+            || !resp_buf[cursor..].iter().all(|&b| b == 0xff)
+        {
+            return Err(NONA_ERR_NSM_IOCTL_FAILED);
+        }
+        return Ok(item_count);
+    }
+
     let (item_count, mut cursor) = if addl < 24 {
         (addl as usize, 20usize)
     } else if addl == 24 {
@@ -238,7 +289,10 @@ pub fn parse_nsm_get_random_response_into(resp_buf: &[u8], out: &mut [u8]) -> Re
     }
 
     if major == 2 {
-        if cursor.saturating_add(item_count) != resp_buf.len() {
+        let end_payload = cursor.saturating_add(item_count);
+        if end_payload.saturating_add(expected_map_breaks) != resp_buf.len()
+            || !resp_buf[end_payload..].iter().all(|&b| b == 0xff)
+        {
             return Err(NONA_ERR_NSM_IOCTL_FAILED);
         }
         let copy_len = core::cmp::min(item_count, out.len());
@@ -276,7 +330,9 @@ pub fn parse_nsm_get_random_response_into(resp_buf: &[u8], out: &mut [u8]) -> Re
                 written += 1;
             }
         }
-        if cursor != resp_buf.len() {
+        if cursor.saturating_add(expected_map_breaks) != resp_buf.len()
+            || !resp_buf[cursor..].iter().all(|&b| b == 0xff)
+        {
             return Err(NONA_ERR_NSM_IOCTL_FAILED);
         }
         Ok(item_count)
@@ -324,7 +380,7 @@ pub unsafe fn query_hardware_random(out: &mut [u8]) -> i32 {
     };
 
     // NSM GetRandom returns 256-1024 random bytes wrapped in a 22-byte CBOR header.
-    let mut resp_raw = [0u8; 2048];
+    let mut resp_raw = [0u8; ATTESTATION_MAX_DOC_SIZE];
     let mut raw_msg = NsmRawMessage {
         request: NsmIovec {
             addr: req_raw.as_ptr() as u64,
