@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "active_release": "1.0.1",
+  "stage_gate": "track1-sealed",
+  "thresholds": {
+    "min_verified_smt_targets": 146,
+    "max_external_body_axioms": 7,
+    "max_stack_frame_bytes": 1408,
+    "min_hygiene_checks": 16
+  },
+  "gates": {
+    "require_non_mutating_eif_manifest": true,
+    "require_tla_model_check": false,
+    "require_p2_timing_hard_gate": false,
+    "require_assembly_spill_audit": false,
+    "require_kms_recipient_binding": false
+  }
+}
