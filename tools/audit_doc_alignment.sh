@@ -116,6 +116,32 @@ PYEOF
 echo "  ✓ Version parity, manifest artifact freshness, and non-mutating EIF hygiene verified."
 
 
+
+echo ""
+echo "[AUDIT 8] Enforcing Lemniscate Assurance Ratchet (declarative policy, git monotonicity & introspection)..."
+if [ ! -f "assurance_policy.json" ]; then
+    echo "  [!] FAIL: Missing root declarative stage-gate contract: assurance_policy.json" >&2
+    exit 1
+fi
+if [ ! -f "tools/verify_assurance_ratchet.py" ]; then
+    echo "  [!] FAIL: Missing ratchet enforcement & introspection engine: tools/verify_assurance_ratchet.py" >&2
+    exit 1
+fi
+if grep -qE '\[ "\$CODE_EXTERNAL_COUNT" -ne 7 \]' tools/audit_doc_alignment.sh; then
+    echo "  [!] FAIL: tools/audit_doc_alignment.sh still hardcodes external_body == 7 instead of delegating to assurance_policy.json." >&2
+    exit 1
+fi
+if ! grep -q "Lemniscate Assurance Ratchet" docs/HAVH.md || ! grep -q "assurance_policy.json" docs/HAVH.md; then
+    echo "  [!] FAIL: docs/HAVH.md must document the Lemniscate Assurance Ratchet and assurance_policy.json." >&2
+    exit 1
+fi
+if ! grep -q "Monotonic Assurance Ratchet" README.md || ! grep -q "assurance_policy.json" README.md; then
+    echo "  [!] FAIL: README.md must document the Monotonic Assurance Ratchet and assurance_policy.json." >&2
+    exit 1
+fi
+python3 tools/verify_assurance_ratchet.py
+echo "  ✓ Lemniscate Assurance Ratchet verified (policy, git monotonicity, and dynamic symbol introspection)."
+
 echo "================================================================="
 echo "DOCUMENTATION AUDIT SWEEP COMPLETE"
 echo "================================================================="
