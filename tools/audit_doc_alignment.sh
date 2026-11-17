@@ -143,6 +143,45 @@ fi
 python3 tools/verify_assurance_ratchet.py
 echo "  ✓ Lemniscate Assurance Ratchet verified (policy, git monotonicity, and dynamic symbol introspection)."
 
+
+echo ""
+echo "[AUDIT 9] Enforcing formal boundary & hardware semantic models (TLA+, STPA/PASTA host model, silicon memory ordering)..."
+if [ ! -f "specs/vsock_session.tla" ] || [ ! -f "specs/vsock_session.cfg" ]; then
+    echo "  [!] FAIL: Missing formal vsock session TLA+ model or TLC config (specs/vsock_session.tla, specs/vsock_session.cfg)." >&2
+    exit 1
+fi
+for sym in Init Next Spec TypeInvariant DeadlockFreedom; do
+    if ! grep -qE "\b${sym}\b" specs/vsock_session.tla; then
+        echo "  [!] FAIL: specs/vsock_session.tla missing required formal specification symbol: ${sym}" >&2
+        exit 1
+    fi
+done
+if ! grep -qE "^verify-models:" Makefile; then
+    echo "  [!] FAIL: Makefile missing 'verify-models' target for TLA+ model checking." >&2
+    exit 1
+fi
+if [ ! -f "docs/HARDWARE_SEMANTICS.md" ]; then
+    echo "  [!] FAIL: Missing silicon semantic gap analysis: docs/HARDWARE_SEMANTICS.md" >&2
+    exit 1
+fi
+for pattern in "TSO" "aarch64" "speculative" "errata"; do
+    if ! grep -qiE "$pattern" docs/HARDWARE_SEMANTICS.md; then
+        echo "  [!] FAIL: docs/HARDWARE_SEMANTICS.md missing required hardware analysis coverage: $pattern" >&2
+        exit 1
+    fi
+done
+for pattern in "STPA" "PASTA" "time-warp" "L3"; do
+    if ! grep -qiE "$pattern" docs/THREAT_MODEL.md; then
+        echo "  [!] FAIL: docs/THREAT_MODEL.md missing adversarial host boundary coverage: $pattern" >&2
+        exit 1
+    fi
+done
+if grep -rnE "\b(SPEC|ENCL|HAVH)-[0-9]+\b" specs/ docs/HARDWARE_SEMANTICS.md docs/THREAT_MODEL.md Makefile; then
+    echo "  [!] FAIL: Internal tracking codes detected in boundary/hardware specifications." >&2
+    exit 1
+fi
+echo "  ✓ Formal TLA+ session model, STPA/PASTA host threat model, and silicon memory-ordering specs verified."
+
 echo "================================================================="
 echo "DOCUMENTATION AUDIT SWEEP COMPLETE"
 echo "================================================================="
