@@ -190,7 +190,8 @@ jobs:
 
           cp "$ENCLAVE_BIN" /tmp/nona_enclave_bin_pass1
           cp "$EIF_BIN" /tmp/nona_enclave_eif_pass1
-          podman rmi -f "localhost/nona-enclave:${{ matrix.arch }}-v2.0.0" >/dev/null
+          CRATE_VER=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          podman rmi -f "localhost/nona-enclave:${{ matrix.arch }}-v${CRATE_VER}" >/dev/null
 
           ./tools/build_nitro_eif.sh --target ${{ matrix.podman_target }} --force-cross
 

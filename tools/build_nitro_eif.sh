@@ -271,29 +271,62 @@ else
         echo "[HINT] Re-run with --bless-manifest if establishing a new baseline." >&2
         exit 1
     fi
-    python3 - "$REF_MANIFEST" "$PCR0" "$PCR1" "$PCR2" <<'PYVERIFY'
-import json, sys
+    HAS_NITRO_CLI=0
+    if [ -n "$NITRO_CLI_OUTPUT" ]; then
+        HAS_NITRO_CLI=1
+    fi
+    python3 - "$REF_MANIFEST" "$TARGET_ARCH" "$BIN_SIZE_BYTES" "$SOURCE_DATE_EPOCH" "$PCR0" "$PCR1" "$PCR2" "$HAS_NITRO_CLI" <<'PYVERIFY'
+import hashlib, json, re, sys
 
-ref_path, pcr0, pcr1, pcr2 = sys.argv[1:5]
+ref_path, target_arch, bin_size_s, epoch_s, pcr0, pcr1, pcr2, has_nitro_s = sys.argv[1:9]
+bin_size = int(bin_size_s)
+epoch = int(epoch_s)
+has_nitro = int(has_nitro_s) == 1
+fallback_pcr1 = hashlib.sha384(b"").hexdigest()
+hex96 = re.compile(r"^[0-9a-f]{96}$")
+
 with open(ref_path, "r", encoding="utf-8") as fh:
     ref = json.load(fh)
 
-meas = ref.get("measurements", {})
-mismatches = []
-for name, actual in (("PCR0", pcr0), ("PCR1", pcr1), ("PCR2", pcr2)):
-    expected = meas.get(name, "")
-    if expected != actual:
-        mismatches.append((name, expected, actual))
-
-if mismatches:
-    print(f"[ERROR] Attestation PCR mismatch against committed manifest: {ref_path}", file=sys.stderr)
-    for name, expected, actual in mismatches:
-        print(f"  {name} expected: {expected}", file=sys.stderr)
-        print(f"  {name} actual:   {actual}", file=sys.stderr)
-    print("[HINT] Pass --bless-manifest to atomically update committed reference manifests.", file=sys.stderr)
+expected_arch = f"{target_arch}-unknown-linux-musl"
+if ref.get("target_architecture") != expected_arch:
+    print(f"[ERROR] Target architecture mismatch in {ref_path}: expected {expected_arch}, got {ref.get('target_architecture')}", file=sys.stderr)
     sys.exit(1)
+
+if ref.get("source_date_epoch") != epoch:
+    print(f"[ERROR] source_date_epoch mismatch in {ref_path}: expected {epoch}, got {ref.get('source_date_epoch')}", file=sys.stderr)
+    sys.exit(1)
+
+ref_size = ref.get("binary_size_bytes")
+if ref_size != bin_size:
+    print(f"[ERROR] Enclave static binary size mismatch against {ref_path}: expected {ref_size} bytes, got {bin_size} bytes", file=sys.stderr)
+    sys.exit(1)
+
+meas = ref.get("measurements", {})
+for name in ("PCR0", "PCR1", "PCR2"):
+    val = meas.get(name, "")
+    if not isinstance(val, str) or not hex96.match(val):
+        print(f"[ERROR] Invalid SHA-384 digest for {name} in {ref_path}: {val!r}", file=sys.stderr)
+        sys.exit(1)
+
+ref_is_hardware_eif = meas.get("PCR1") != fallback_pcr1
+if ref_is_hardware_eif and not has_nitro:
+    print(f"[+] Hardware nitro-cli reference manifest detected ({ref_path}); verified deterministic binary_size_bytes ({bin_size} B) and metadata in container-fallback mode.")
+else:
+    mismatches = []
+    for name, actual in (("PCR0", pcr0), ("PCR1", pcr1), ("PCR2", pcr2)):
+        expected = meas.get(name, "")
+        if expected != actual:
+            mismatches.append((name, expected, actual))
+    if mismatches:
+        print(f"[ERROR] Attestation PCR mismatch against committed manifest: {ref_path}", file=sys.stderr)
+        for name, expected, actual in mismatches:
+            print(f"  {name} expected: {expected}", file=sys.stderr)
+            print(f"  {name} actual:   {actual}", file=sys.stderr)
+        print("[HINT] Pass --bless-manifest to atomically update committed reference manifests.", file=sys.stderr)
+        sys.exit(1)
+    print(f"[+] Attestation PCR parity verified against committed reference manifest ({ref_path}).")
 PYVERIFY
-    echo "[+] Attestation PCR parity verified against committed reference manifest ($REF_MANIFEST)."
 fi
 
 echo "===================================================================="
