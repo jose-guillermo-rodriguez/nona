@@ -228,6 +228,30 @@ else
     echo "  ✓ Zero non-NSM entropy fallbacks detected in src/."
 fi
 
+# ---------------------------------------------------------
+# Check 15: Stateless Ephemeral-Session Invariant (Zero Host Disk Persistence)
+# ---------------------------------------------------------
+echo "--> Check 15: Enforcing stateless ephemeral-session invariant (zero host disk persistence in src/)..."
+PERSISTENCE_HITS=$(grep -rnE "\b(std::fs::write|std::fs::create_dir|File::create|OpenOptions::new)\b" src/ || true)
+if [ -n "$PERSISTENCE_HITS" ]; then
+    echo "  [STATELESS INVARIANT VIOLATION] Host filesystem write/persistence primitive detected in src/:"
+    echo "$PERSISTENCE_HITS"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Zero host filesystem persistence primitives detected in src/."
+fi
+
+# ---------------------------------------------------------
+# Check 16: Feistel Bijection Boundary & Non-Confidentiality Guardrail
+# ---------------------------------------------------------
+echo "--> Check 16: Verifying nona_permute_index non-confidentiality bijection guardrail in include/nona.h..."
+if ! grep -B 6 "nona_permute_index(" include/nona.h | grep -qiE "bijection.*not.*(cipher|encryption|confidentiality)"; then
+    echo "  [API SCOPE VIOLATION] include/nona.h must explicitly document nona_permute_index as a collision-free bijection and NOT a cryptographic cipher or confidentiality primitive."
+    ERRORS=$((ERRORS + 1))
+else
+    echo "  ✓ Feistel bijection non-confidentiality guardrail verified in include/nona.h."
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo "=========================================================="
     echo "[HYGIENE SUITE FAILED] Total violations detected: $ERRORS"

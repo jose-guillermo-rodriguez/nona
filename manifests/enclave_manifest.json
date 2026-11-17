@@ -1,17 +1,18 @@
 {
   "schema_version": "2.0.0",
+  "crate_version": "1.0.1",
   "enclave_name": "nona_enclave",
-  "target_architecture": "aarch64-unknown-linux-musl",
-  "container_platform": "linux/arm64",
+  "target_architecture": "x86_64-unknown-linux-musl",
+  "container_platform": "linux/amd64",
   "source_date_epoch": 1700000000,
-  "binary_size_bytes": 397256,
+  "binary_size_bytes": 389120,
   "max_memory_ceiling_mb": 16,
   "vsock_port": 5005,
   "measurements": {
     "hash_algorithm": "SHA-384",
-    "PCR0": "be2353ac32f93ece3849db6f9b2a777715bcac9908732395d1aa7ba0dbc28d6296a593bd22b0e72885a97ff32e4901e0",
-    "PCR1": "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03",
-    "PCR2": "7346bc1b91c327fdd2b0f03b7635772fb7fc0d5c665c76a64ab691e20152ceb86967e52a9ed5ad874744fd18bad12b2e"
+    "PCR0": "1163ac299b60c97f0cf1d4bcede5370c00dfc906f66c2952db70cad8a6c2ce3f8401f61478bed430625b3dfe25f4414d",
+    "PCR1": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+    "PCR2": "ee2cbe2ebdfe4e26dd6d0979060bae16f88f0b74b2296ba7c4276571862d02e08e764e3f22623ad576b7365424e5e01f"
   },
   "attestation_binding": {
     "curve": "secp256k1",

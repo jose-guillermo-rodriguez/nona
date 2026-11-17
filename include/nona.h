@@ -222,7 +222,8 @@ int32_t nona_normalize_and_obfuscate(
     uint64_t* out_permuted_index
 );
 
-/// Standalone Feistel index permutation
+/// Standalone Feistel index permutation (`f^-1(f(x)) = x`): collision-free
+/// deterministic bijection for index permutation; NOT a cryptographic cipher, block cipher, or confidentiality primitive.
 int32_t nona_permute_index(
     const IndexPermutationCircuit* circuit_ptr,
     uint64_t index,
