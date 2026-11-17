@@ -36,8 +36,9 @@ nona/
 ├── docs/
 │   ├── C_ABI.md                     # Darwin/Apple Mach-O static linkage guide
 │   ├── HAVH.md                      # High-Assurance Verification Harness (5-tier certification)
+│   ├── HARDWARE_SEMANTICS.md        # Silicon memory consistency (TSO vs aarch64), DSE & errata audit
 │   ├── TCB.md                       # Trusted Computing Base & SMT axiom boundaries
-│   └── THREAT_MODEL.md              # Untrusted host & adversary threat boundaries
+│   └── THREAT_MODEL.md              # STPA/PASTA adversarial host & vsock threat boundaries
 ├── .dockerignore                    # Container build context exclusion filter for reproducible builds
 ├── .gitattributes                   # Deterministic line-ending enforcement (LF) across platforms
 ├── .gitignore                       # Repository hygiene and ephemeral artifact exclusion filters
@@ -73,6 +74,9 @@ nona/
 │   └── enclave_manifest_x86_64.json          # Sealed AWS Nitro x86_64 image measurements
 ├── proofs/
 │   └── verus_verification.log       # Audit evidence: 146/146 SMT verification log
+├── specs/
+│   ├── vsock_session.cfg            # TLC model-checker configuration & invariant bindings
+│   └── vsock_session.tla            # Exhaustive TLA+ AF_VSOCK session & adversarial channel model
 ├── src/
 │   ├── lib.rs                       # Pure #![no_std] engine entrypoint (libnona_core.a)
 │   ├── psi.rs                       # 92 Verus proofs (Solinas reduction, RCB 2016 complete addition, and constant-time scalar multiplication ladder)
@@ -109,7 +113,9 @@ Nona rejects standard unit-testing pyramids in favor of a 5-tier **High-Assuranc
 
 ### Security Architecture & Governance
 - **Canonical Assurance Specification:** [`docs/HAVH.md`](docs/HAVH.md)
-- **Threat Model & Adversary Boundaries:** [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+- **Threat Model & Adversary Boundaries (STPA/PASTA):** [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+- **Silicon Semantic Gap Analysis (TSO vs. aarch64):** [`docs/HARDWARE_SEMANTICS.md`](docs/HARDWARE_SEMANTICS.md)
+- **Formal Vsock Session State Machine (TLA+):** [`specs/vsock_session.tla`](specs/vsock_session.tla)
 - **Trusted Computing Base & SMT Axioms:** [`docs/TCB.md`](docs/TCB.md)
 - **Monotonic Assurance Ratchet:** Declarative stage-gate contract (`assurance_policy.json`) enforced by `tools/verify_assurance_ratchet.py` as a deterministic, git-anchored release-engineering invariant against `origin/main`
 - **Machine Stack Verification:** Audited via `readelf --stack-sizes` (<= 4096 B)

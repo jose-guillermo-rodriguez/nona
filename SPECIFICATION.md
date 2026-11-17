@@ -10,7 +10,7 @@
 
 ## 1. System Invariants & Execution Boundaries
 
-The core engine is a zero-dependency, statically verified cryptographic appliance verified through the 5-tier **High-Assurance Verification Harness (HAVH)** (see [`docs/HAVH.md`](docs/HAVH.md)). All compilation units within `libnona_core.a` adhere to the following invariants:
+The core engine is a zero-dependency, statically verified cryptographic appliance verified through the 5-tier **High-Assurance Verification Harness (HAVH)** (see [`docs/HAVH.md`](docs/HAVH.md)). Adversarial host boundaries, formal vsock session state transitions, and physical silicon memory-consistency guarantees are governed by [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`specs/vsock_session.tla`](specs/vsock_session.tla), and [`docs/HARDWARE_SEMANTICS.md`](docs/HARDWARE_SEMANTICS.md). All compilation units within `libnona_core.a` adhere to the following invariants:
 
 The core engine is a zero-dependency, statically verified cryptographic appliance verified through the 5-tier **High-Assurance Verification Harness (HAVH)** (see [`docs/HAVH.md`](docs/HAVH.md)). All compilation units within `libnona_core.a` adhere to the following invariants:
 
