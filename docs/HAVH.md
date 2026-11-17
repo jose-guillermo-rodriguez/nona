@@ -79,7 +79,18 @@ Confidential computing models mandate that sensitive memory must not persist in 
 
 ---
 
-## 3. Operational Interface
+## 3. The Lemniscate Assurance Ratchet (LAR)
+
+The **Lemniscate Assurance Ratchet (LAR)** couples specification, implementation, and verification into a closed, non-regressing feedback loop governed by [`assurance_policy.json`](../assurance_policy.json) and enforced by `tools/verify_assurance_ratchet.py`:
+
+- **Bidirectional Falsification Control Loop:** Forward verification ($\text{Spec} \rightarrow \text{Code}$) binds the core engine to machine-checked Verus SMT contracts, static zero-heap linkage audits, and stack-frame ceilings. Reverse falsification ($\text{Harness} \rightarrow \text{Spec}$) executes pre-code alignment gates, artifact freshness checks, and live symbol introspection so verification oracles cannot drift silently behind code or documentation changes.
+- **Declarative Stage-Gate Policy (`assurance_policy.json`):** The repository root maintains a versioned JSON contract encoding quantitative assurance watermarks (`min_verified_smt_targets`, `max_external_body_axioms`, `max_stack_frame_bytes`, `min_hygiene_checks`) alongside progressive boolean stage gates (`require_non_mutating_eif_manifest`, `require_tla_model_check`, `require_p2_timing_hard_gate`, `require_assembly_spill_audit`, `require_kms_recipient_binding`).
+- **Git-Anchored Monotonicity Against `origin/main`:** Before any commit or pull request passes alignment verification, `tools/verify_assurance_ratchet.py` inspects the baseline contract on `origin/main` (falling back to `main` or the latest release tag during bootstrap) via `git show <ref>:assurance_policy.json`. Any attempt to lower SMT proof floors, expand the `#[verifier::external_body]` trusted computing base, relax stack-frame ceilings, drop hygiene gates, or disable a previously sealed boolean gate fails closed.
+- **Dynamic Symbol & Artifact Introspection:** The ratchet engine scans `src/` for all `#[no_mangle] pub extern "C"` entry points, cross-checks compiled `libnona_core.a` static archives when present, verifies every exported C-ABI symbol is declared in `include/nona.h` or `include/nona_udf.h`, and activates stage-gated model checks (such as `specs/*.tla`) as policy gates promote to `true`.
+
+---
+
+## 4. Operational Interface
 
 The harness provides three entry points via the root Makefile:
 

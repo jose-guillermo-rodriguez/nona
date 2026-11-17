@@ -41,6 +41,7 @@ nona/
 ├── .dockerignore                    # Container build context exclusion filter for reproducible builds
 ├── .gitattributes                   # Deterministic line-ending enforcement (LF) across platforms
 ├── .gitignore                       # Repository hygiene and ephemeral artifact exclusion filters
+├── assurance_policy.json            # Declarative stage-gate & monotonic assurance ratchet contract
 ├── Cargo.lock                       # Locked deterministic dependency manifest
 ├── Cargo.toml                       # Manifest: default = [], std = [] features
 ├── clippy.toml                      # Static analysis lint policy enforcing <= 4 KiB stack frame ceiling
@@ -110,6 +111,7 @@ Nona rejects standard unit-testing pyramids in favor of a 5-tier **High-Assuranc
 - **Canonical Assurance Specification:** [`docs/HAVH.md`](docs/HAVH.md)
 - **Threat Model & Adversary Boundaries:** [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 - **Trusted Computing Base & SMT Axioms:** [`docs/TCB.md`](docs/TCB.md)
+- **Monotonic Assurance Ratchet:** Declarative stage-gate contract (`assurance_policy.json`) enforced by `tools/verify_assurance_ratchet.py` as a deterministic, git-anchored release-engineering invariant against `origin/main`
 - **Machine Stack Verification:** Audited via `readelf --stack-sizes` (<= 4096 B)
 - **Supply-Chain Provenance:** CycloneDX v1.5 JSON SBOM (`make sbom` / `nona-core.cdx.json`)
 
