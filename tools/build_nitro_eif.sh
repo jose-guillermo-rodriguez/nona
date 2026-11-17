@@ -12,6 +12,12 @@ set -euo pipefail
 NONA_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$NONA_ROOT"
 
+CRATE_VERSION="$(grep -m1 '^version = ' "${NONA_ROOT}/Cargo.toml" | sed -E 's/^version = "([^"]+)".*/\1/')"
+if [ -z "$CRATE_VERSION" ]; then
+    echo "[ERROR] Unable to parse crate version from Cargo.toml" >&2
+    exit 1
+fi
+
 OUTPUT_DIR="${NONA_ROOT}/target/enclave"
 mkdir -p "$OUTPUT_DIR"
 
@@ -25,6 +31,7 @@ esac
 
 TARGET_ARCH="$HOST_ARCH"
 FORCE_CROSS=0
+BLESS_MANIFEST=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,9 +47,13 @@ while [[ $# -gt 0 ]]; do
             FORCE_CROSS=1
             shift 1
             ;;
+        --bless-manifest)
+            BLESS_MANIFEST=1
+            shift 1
+            ;;
         *)
             echo "[ERROR] Unknown option: $1" >&2
-            echo "Usage: $0 [--target x86_64|aarch64] [--force-cross]" >&2
+            echo "Usage: $0 [--target x86_64|aarch64] [--force-cross] [--bless-manifest]" >&2
             exit 1
             ;;
     esac
@@ -130,22 +141,22 @@ if [ "$IS_PODMAN" -eq 1 ]; then
     fi
 fi
 
-IMAGE_TAG="localhost/nona-enclave:${TARGET_ARCH}-v2.0.0"
+IMAGE_TAG="localhost/nona-enclave:${TARGET_ARCH}-v${CRATE_VERSION}"
 STATIC_BIN_OUTPUT="${OUTPUT_DIR}/nona_enclave_musl_${TARGET_ARCH}"
 EIF_OUTPUT="${OUTPUT_DIR}/nona_enclave_${TARGET_ARCH}.eif"
 MANIFEST_DIR="${NONA_ROOT}/manifests"
-    mkdir -p "$MANIFEST_DIR"
-    MANIFEST_OUTPUT="${MANIFEST_DIR}/enclave_manifest_${TARGET_ARCH}.json"
+REF_MANIFEST="${MANIFEST_DIR}/enclave_manifest_${TARGET_ARCH}.json"
+MANIFEST_OUTPUT="${OUTPUT_DIR}/enclave_manifest_${TARGET_ARCH}.json"
 
 echo "===================================================================="
 echo "NONA CORE ENGINE: AWS NITRO ENCLAVE REPRODUCIBLE BUILD"
+echo "Crate Version:       v${CRATE_VERSION}"
 echo "Target Architecture: ${TARGET_ARCH} | Platform: ${CONTAINER_PLATFORM}"
 echo "Builder Base Image:  ${BUILDER_IMAGE}"
 echo "Fixed Epoch:         ${SOURCE_DATE_EPOCH}"
 echo "===================================================================="
 
-# 4. Build Hermetic Enclave Container Image
-# Pre-flight container daemon connectivity check
+# 5. Build Hermetic Enclave Container Image
 if ! "$CONTAINER_BIN" info >/dev/null 2>&1; then
     echo "[ERROR] Container engine ($CONTAINER_BIN) is unreachable or not running." >&2
     echo "Ensure the container daemon / VM is active (e.g., systemctl start docker or podman machine start)." >&2
@@ -153,18 +164,9 @@ if ! "$CONTAINER_BIN" info >/dev/null 2>&1; then
 fi
 
 echo "[1/4] Building hermetic enclave container image (${IMAGE_TAG}) via $(basename "$CONTAINER_BIN")..."
-"$CONTAINER_BIN" build \
-    --no-cache \
-    --platform "$CONTAINER_PLATFORM" \
-    ${BUILD_REPRO_OPTS[@]+"${BUILD_REPRO_OPTS[@]}"} \
-    --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
-    --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
-    ${PODMAN_CGROUP_OPTS[@]+"${PODMAN_CGROUP_OPTS[@]}"} \
-    -t "$IMAGE_TAG" \
-    -f Dockerfile.reproducible .
+"$CONTAINER_BIN" build     --no-cache     --platform "$CONTAINER_PLATFORM"     ${BUILD_REPRO_OPTS[@]+"${BUILD_REPRO_OPTS[@]}"}     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"     --build-arg BUILDER_IMAGE="$BUILDER_IMAGE"     --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE"     ${PODMAN_CGROUP_OPTS[@]+"${PODMAN_CGROUP_OPTS[@]}"}     -t "$IMAGE_TAG"     -f Dockerfile.reproducible .
 
-# 5. Extract static binary to verify linkage and footprint
+# 6. Extract static binary to verify linkage and footprint
 echo "[2/4] Verifying binary artifacts and memory footprint ceiling..."
 CONTAINER_ID="$("$CONTAINER_BIN" create ${PODMAN_CGROUP_OPTS[@]+"${PODMAN_CGROUP_OPTS[@]}"} --platform "$CONTAINER_PLATFORM" "$IMAGE_TAG")"
 trap '"$CONTAINER_BIN" rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true' EXIT
@@ -184,13 +186,11 @@ if [ "$BIN_SIZE_BYTES" -gt 16777216 ]; then
 fi
 echo "[+] Footprint constraint verified: Artifact is strictly < 16 MB."
 
-# 6. Build .eif artifact or assemble reproducible image bundle
+# 7. Build .eif artifact or assemble reproducible image bundle
 echo "[3/4] Packaging Enclave Image Format (.eif)..."
 NITRO_CLI_OUTPUT=""
 if command -v nitro-cli &>/dev/null; then
-    NITRO_CLI_OUTPUT=$(nitro-cli build-enclave \
-        --docker-uri "$IMAGE_TAG" \
-        --output-file "$EIF_OUTPUT")
+    NITRO_CLI_OUTPUT=$(nitro-cli build-enclave         --docker-uri "$IMAGE_TAG"         --output-file "$EIF_OUTPUT")
     echo "[+] Generated production EIF via host nitro-cli: $EIF_OUTPUT"
 else
     rm -f "$EIF_OUTPUT" && "$CONTAINER_BIN" save "$IMAGE_TAG" -o "$EIF_OUTPUT"
@@ -201,11 +201,11 @@ cp -f "$EIF_OUTPUT" "${OUTPUT_DIR}/nona_enclave.eif"
 EIF_SIZE=$(wc -c < "$EIF_OUTPUT" | tr -d ' ')
 echo "[+] Enclave Image Artifact Size: ${EIF_SIZE} bytes"
 
-# 7. Generate Signed Attestation Measurement Manifest
+# 8. Generate Signed Attestation Measurement Manifest into target/enclave/
 echo "[4/4] Calculating cryptographic attestation PCR measurements..."
 PCR0=""
 PCR1=""
-PCR2="" 
+PCR2=""
 if [ -n "$NITRO_CLI_OUTPUT" ] && command -v jq &>/dev/null; then
     PCR0=$(echo "$NITRO_CLI_OUTPUT" | jq -r '.Measurements.PCR0 // empty')
     PCR1=$(echo "$NITRO_CLI_OUTPUT" | jq -r '.Measurements.PCR1 // empty')
@@ -228,6 +228,7 @@ fi
 cat << MANIFEST_EOF > "$MANIFEST_OUTPUT"
 {
   "schema_version": "2.0.0",
+  "crate_version": "${CRATE_VERSION}",
   "enclave_name": "nona_enclave",
   "target_architecture": "${TARGET_ARCH}-unknown-linux-musl",
   "container_platform": "${CONTAINER_PLATFORM}",
@@ -249,13 +250,58 @@ cat << MANIFEST_EOF > "$MANIFEST_OUTPUT"
 }
 MANIFEST_EOF
 
-cp -f "$MANIFEST_OUTPUT" "${MANIFEST_DIR}/enclave_manifest.json"
+cp -f "$MANIFEST_OUTPUT" "${OUTPUT_DIR}/enclave_manifest.json"
+
+# 9. Fail-closed PCR attestation gate or atomic manifest blessing
+if [ "$BLESS_MANIFEST" -eq 1 ]; then
+    mkdir -p "$MANIFEST_DIR"
+    TMP_REF="${REF_MANIFEST}.tmp.$$"
+    cp -f "$MANIFEST_OUTPUT" "$TMP_REF"
+    mv -f "$TMP_REF" "$REF_MANIFEST"
+    echo "[+] Blessed reference manifest: $REF_MANIFEST"
+    if [ "$TARGET_ARCH" = "x86_64" ]; then
+        TMP_CANONICAL="${MANIFEST_DIR}/enclave_manifest.json.tmp.$$"
+        cp -f "$MANIFEST_OUTPUT" "$TMP_CANONICAL"
+        mv -f "$TMP_CANONICAL" "${MANIFEST_DIR}/enclave_manifest.json"
+        echo "[+] Blessed canonical manifest: ${MANIFEST_DIR}/enclave_manifest.json"
+    fi
+else
+    if [ ! -f "$REF_MANIFEST" ]; then
+        echo "[ERROR] Committed reference manifest missing: $REF_MANIFEST" >&2
+        echo "[HINT] Re-run with --bless-manifest if establishing a new baseline." >&2
+        exit 1
+    fi
+    python3 - "$REF_MANIFEST" "$PCR0" "$PCR1" "$PCR2" <<'PYVERIFY'
+import json, sys
+
+ref_path, pcr0, pcr1, pcr2 = sys.argv[1:5]
+with open(ref_path, "r", encoding="utf-8") as fh:
+    ref = json.load(fh)
+
+meas = ref.get("measurements", {})
+mismatches = []
+for name, actual in (("PCR0", pcr0), ("PCR1", pcr1), ("PCR2", pcr2)):
+    expected = meas.get(name, "")
+    if expected != actual:
+        mismatches.append((name, expected, actual))
+
+if mismatches:
+    print(f"[ERROR] Attestation PCR mismatch against committed manifest: {ref_path}", file=sys.stderr)
+    for name, expected, actual in mismatches:
+        print(f"  {name} expected: {expected}", file=sys.stderr)
+        print(f"  {name} actual:   {actual}", file=sys.stderr)
+    print("[HINT] Pass --bless-manifest to atomically update committed reference manifests.", file=sys.stderr)
+    sys.exit(1)
+PYVERIFY
+    echo "[+] Attestation PCR parity verified against committed reference manifest ($REF_MANIFEST)."
+fi
 
 echo "===================================================================="
 echo "AWS NITRO ENCLAVE BUILD COMPLETE (${TARGET_ARCH})"
-echo "  Artifact: $EIF_OUTPUT"
-echo "  Manifest: $MANIFEST_OUTPUT"
-echo "  PCR0:     $PCR0"
-echo "  PCR1:     $PCR1"
-echo "  PCR2:     $PCR2"
+echo "  Artifact:           $EIF_OUTPUT"
+echo "  Generated Manifest: $MANIFEST_OUTPUT"
+echo "  Reference Manifest: $REF_MANIFEST"
+echo "  PCR0:               $PCR0"
+echo "  PCR1:               $PCR1"
+echo "  PCR2:               $PCR2"
 echo "===================================================================="
