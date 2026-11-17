@@ -259,6 +259,28 @@ if [ "$ERRORS" -gt 0 ]; then
     exit 1
 fi
 
+echo "--> Check 17: Enforcing bounded O(N) vsock/wire framing & C-ABI FFI perimeter regression suite..."
+if [ ! -f "tests/integration/test_vsock_perimeter_bounds.rs" ]; then
+    echo "  [!] FAIL: Missing adversarial transport & FFI perimeter test suite: tests/integration/test_vsock_perimeter_bounds.rs"
+    exit 1
+fi
+if ! grep -q 'name = "test_vsock_perimeter_bounds"' Cargo.toml; then
+    echo "  [!] FAIL: Cargo.toml must register [[test]] target 'test_vsock_perimeter_bounds'."
+    exit 1
+fi
+if grep -rnE '\.read_to_end\(' src/ingest.rs src/enclave_server.rs src/bin/nona_enclave.rs 2>/dev/null; then
+    echo "  [!] FAIL: Unbounded .read_to_end() detected on untrusted transport/wire stream."
+    exit 1
+fi
+if ! grep -rnE 'MAX_.*FRAME|MAX_.*PAYLOAD|MAX_.*MSG|MAX_.*WIRE' src/ingest.rs src/enclave_server.rs src/bin/nona_enclave.rs >/dev/null 2>&1; then
+    echo "  [!] FAIL: Explicit static frame/payload ceiling constant missing in transport/wire modules."
+    exit 1
+fi
+if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' tests/integration/test_vsock_perimeter_bounds.rs src/ingest.rs src/enclave_server.rs src/bin/nona_enclave.rs 2>/dev/null; then
+    echo "  [!] FAIL: Internal tracking codes detected in transport/FFI perimeter files."
+    exit 1
+fi
+echo "  ✓ Bounded vsock/wire framing and C-ABI FFI perimeter test registration verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
 echo "=========================================================="
