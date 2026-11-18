@@ -153,8 +153,16 @@ verify_pcr_manifest() {
         EXPECTED_PCR0=$(jq -r '.measurements.PCR0 // empty' "$MANIFEST_FILE" 2>/dev/null || true)
         if [ -n "$EXPECTED_PCR0" ]; then
             if [ "$HAS_NITRO_CLI" = true ]; then
-                ACTUAL_PCR0=$(nitro-cli describe-eif --eif-path "$EIF_FILE" | jq -r '.Measurements.PCR0 // empty' 2>/dev/null || true)
-                if [ -n "$ACTUAL_PCR0" ] && [ "$EXPECTED_PCR0" != "$ACTUAL_PCR0" ]; then
+                if ! EIF_JSON=$(nitro-cli describe-eif --eif-path "$EIF_FILE"); then
+                    echo "[ERROR] Failed to inspect EIF measurements at $EIF_FILE" >&2
+                    exit 1
+                fi
+                ACTUAL_PCR0=$(echo "$EIF_JSON" | jq -r '.Measurements.PCR0 // empty' 2>/dev/null || true)
+                if [ -z "$ACTUAL_PCR0" ]; then
+                    echo "[ERROR] Unable to parse PCR0 from $EIF_FILE" >&2
+                    exit 1
+                fi
+                if [ "$EXPECTED_PCR0" != "$ACTUAL_PCR0" ]; then
                     echo "[SECURITY ALERT] PCR0 mismatch detected!" >&2
                     echo "  Expected (Manifest): $EXPECTED_PCR0" >&2
                     echo "  Actual (EIF):        $ACTUAL_PCR0" >&2
@@ -257,8 +265,6 @@ esac
 # Launch Flow: start
 # ---------------------------------------------------------
 
-verify_pcr_manifest
-
 if [ "$HAS_NITRO_CLI" = true ]; then
     check_allocator_service
 
@@ -267,6 +273,8 @@ if [ "$HAS_NITRO_CLI" = true ]; then
         echo "[*] Building hermetic enclave image now..."
         ./tools/build_nitro_eif.sh --target "${TARGET_ARCH}"
     fi
+
+    verify_pcr_manifest
 
     RUN_CMD=(
         nitro-cli run-enclave

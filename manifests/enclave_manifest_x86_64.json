@@ -5,14 +5,14 @@
   "target_architecture": "x86_64-unknown-linux-musl",
   "container_platform": "linux/amd64",
   "source_date_epoch": 1700000000,
-  "binary_size_bytes": 430552,
+  "binary_size_bytes": 438744,
   "max_memory_ceiling_mb": 16,
   "vsock_port": 5005,
   "measurements": {
     "hash_algorithm": "SHA-384",
-    "PCR0": "e28865995ee0d1bec2bf4659aadb7430da43f971e58d7e1a27055b929abb6d5f78096e0eb63076a84f18e9c751dc8c0e",
-    "PCR1": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
-    "PCR2": "e0c0cc5cfefd79250eb5e556abf5219084de0d7880eb1d3ef0a9749229f3bee48207c830c4bc150379bbfe7296a8ce4f"
+    "PCR0": "61303814d31f1c5e30360881f2bbe928f3c7bfa95bd44fbd43920c68255ef09babe1b94ba0fb0ef63fa5d73a0b086503",
+    "PCR1": "4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493",
+    "PCR2": "59c901d2ff30305ae5a26261a6484f5d9ccc3f526be6c7b84baffef0ba53c7e0a7fba1daa046648d77f66308391698a2"
   },
   "attestation_binding": {
     "curve": "secp256k1",

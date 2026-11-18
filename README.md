@@ -256,11 +256,21 @@ Nona operates under two operational boundaries with distinct security expectatio
 
 > **Note on Cargo Flags:** Because the core engine is pure `#![no_std]` by default, host CLI tools require `--features std`.
 
+### Prerequisites (AWS EC2 Nitro Host — Amazon Linux 2023)
+Provision a Nitro-enabled instance (minimum 4 vCPUs, e.g. `c6i.xlarge` on `x86_64` or `c7g.xlarge` on `aarch64`, with `--enclave-options Enabled=true`), install the Nitro Enclave CLI, container engine, `jq`, and Rust toolchain, and ensure `nitro-enclaves-allocator.service` reserves at least `512 MiB` RAM (`1024 MiB` on `aarch64`) and `2` vCPUs in `/etc/nitro_enclaves/allocator.yaml`:
+```bash
+sudo dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker jq gcc git
+sudo usermod -aG ne,docker "$USER"
+sudo systemctl enable --now docker nitro-enclaves-allocator.service
+```
+*(Log out and back in once after `usermod` so the `ne` and `docker` group memberships take effect.)*
+
 ### Step 1: Launch Daemon
-Auto-detects AWS Nitro Enclave hardware versus local workstation mock mode:
+Auto-detects AWS Nitro Enclave hardware versus local workstation mock mode (builds `target/enclave/nona_enclave_<arch>.eif` automatically if missing):
 ```bash
 ./deploy/run_nitro.sh start --cpu-count 2 --cid 16
 ```
+*(If testing unblessed local changes whose PCRs differ from `manifests/enclave_manifest_<arch>.json`, pass `--skip-pcr-check` to `run_nitro.sh` and point `--manifest` at `target/enclave/enclave_manifest.json` in Steps 3–4.)*
 
 ### Step 2: Verify Protocol Connectivity
 Verify zero-copy wire frame roundtrip via developer CLI ping:
@@ -269,7 +279,7 @@ cargo run --bin nona --features std -- ping
 ```
 
 ### Step 3: Hardware Attestation vs. Mock Manifest Verification
-In production on AWS EC2 Nitro instances (verifies hardware `/dev/nsm` signature):
+In production on AWS EC2 Nitro instances (verifies hardware `/dev/nsm` COSE signature, AWS Root CA chain, and PCRs):
 ```bash
 cargo run --bin nona --features std -- attest --manifest manifests/enclave_manifest.json
 ```
@@ -279,7 +289,14 @@ On local development workstations (verifies client parsing against reference mea
 cargo run --bin nona --features std -- attest --dev-simulation --manifest manifests/enclave_manifest.json
 ```
 
-### Step 4: Terminate Daemon
+### Step 4: Execute Two-Phase Private Set Intersection (`blind` -> `match`)
+Pre-blind Party A's records inside the attested enclave (Phase 1) and intersect Party B's dataset against the blinded tokens (Phase 2):
+```bash
+cargo run --bin nona --features std -- blind --manifest manifests/enclave_manifest.json < party_a.txt > party_a.blinded
+cargo run --bin nona --features std -- match --manifest manifests/enclave_manifest.json --target party_a.blinded < party_b.txt
+```
+
+### Step 5: Terminate Daemon
 Cleanly terminate the background daemon:
 ```bash
 ./deploy/run_nitro.sh stop

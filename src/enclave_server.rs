@@ -357,6 +357,7 @@ pub struct AlignedKeyBuffer {
 impl Drop for AlignedKeyBuffer {
     fn drop(&mut self) {
         ct_zeroize(&mut self.data);
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
     }
 }
 
@@ -373,6 +374,7 @@ pub fn purge_session_key_unconditional() {
         ct_zeroize(&mut *SESSION_KEY.privkey.get());
         ct_zeroize(&mut *SESSION_KEY.pubkey.get());
     }
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
     SESSION_KEY.op_count.store(0, Ordering::SeqCst);
     SESSION_KEY
         .state
@@ -473,6 +475,8 @@ fn ensure_session_key_initialized() {
                         (*SESSION_KEY.pubkey.get()).copy_from_slice(&pubkey);
                     }
                     ct_zeroize(&mut privkey.data);
+                    ct_zeroize(&mut pubkey);
+                    core::sync::atomic::compiler_fence(Ordering::SeqCst);
                     SESSION_KEY.op_count.store(0, Ordering::SeqCst);
                     SESSION_KEY.epoch.fetch_add(1, Ordering::SeqCst);
                     SESSION_KEY
@@ -633,7 +637,7 @@ impl VsockSessionState {
         attestation_doc: &mut AttestationDocumentBuffer,
     ) -> (i32, u32) {
         if self.is_closed() {
-            resp_payload.fill(0);
+            ct_zeroize(resp_payload);
             scratch_buffer.purge();
             attestation_doc.purge();
             self.ops_in_session = 0;
@@ -801,6 +805,7 @@ fn execute_wire_blinding_op(
 
     ct_zeroize(&mut aligned_key.data);
     scratch_buffer.purge();
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
     let out_len = if status == 0 { elements_len as u32 } else { 0 };
     (status, out_len)

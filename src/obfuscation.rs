@@ -8,16 +8,26 @@
 // CARGO / STANDARD RUST COMPILATION PATH
 
 #[cfg(not(verus))]
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use core::sync::atomic::{compiler_fence, Ordering};
 
 #[cfg(not(verus))]
 /// Satisfies [FR-09-IDXOBFC]
 /// Format-Preserving Feistel Index Permutation Circuit over Z_{2^64}.
 #[repr(C, align(64))]
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct IndexPermutationCircuit {
     pub a: u64,
     pub c: u64,
+}
+
+#[cfg(not(verus))]
+impl Drop for IndexPermutationCircuit {
+    fn drop(&mut self) {
+        unsafe {
+            core::ptr::write_volatile(&raw mut self.a, 0);
+            core::ptr::write_volatile(&raw mut self.c, 0);
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
 }
 
 #[cfg(not(verus))]

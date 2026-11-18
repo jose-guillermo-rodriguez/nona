@@ -18,14 +18,16 @@ use nona_core::client::{NonaClient, DEFAULT_UNIX_SOCKET_PATH};
 #[cfg(feature = "std")]
 use nona_core::normalization::normalize_to_buffer;
 #[cfg(feature = "std")]
-use nona_core::psi::{nona_phase2_intersect, NONA_FLAG_FULL_PSI, NONA_FLAG_PSI_CA};
+use nona_core::psi::{nona_phase2_intersect, NONA_FLAG_FULL_PSI};
 
 #[cfg(not(feature = "std"))]
 fn main() {}
 
 #[cfg(feature = "std")]
-const USAGE: &str = "\
-nona 0.1.0 - High-Assurance Private Set Intersection (PSI) CLI
+const USAGE: &str = concat!(
+    "nona ",
+    env!("CARGO_PKG_VERSION"),
+    " - High-Assurance Private Set Intersection (PSI) CLI
 
 USAGE:
     nona <SUBCOMMAND> [OPTIONS] [INPUT]
@@ -53,8 +55,8 @@ OPTIONS:
 EXIT CODES:
     0    Success / clean intersection
     1    Protocol, attestation, or cryptographic boundary failure
-    2    Invalid command line arguments or I/O failure
-";
+    2    Invalid command line arguments or I/O failure\n"
+);
 
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +217,7 @@ fn parse_single_arg(
             process::exit(0);
         }
         "-V" | "--version" => {
-            println!("nona 0.1.0");
+            println!("nona {}", env!("CARGO_PKG_VERSION"));
             process::exit(0);
         }
         val if val.starts_with('-') => {
@@ -247,7 +249,7 @@ fn parse_args() -> Result<CliConfig, (String, i32)> {
         process::exit(0);
     }
     if first == "-V" || first == "--version" {
-        println!("nona 0.1.0");
+        println!("nona {}", env!("CARGO_PKG_VERSION"));
         process::exit(0);
     }
 
@@ -740,21 +742,18 @@ fn run_match(config: &CliConfig) -> Result<(), (String, i32)> {
     }
     .map_err(|e| (format!("Phase 1 blinding stream failed: {e:?}"), 1))?;
 
-    let flags = if config.cardinality_only {
-        NONA_FLAG_PSI_CA
-    } else {
-        NONA_FLAG_FULL_PSI
-    };
-
     let total_a = elements.len();
     let total_b = target_bytes.len() / 32;
 
-    let (matched_local_indices, mut total_cardinality) =
-        execute_psi_intersection_chunks(&blinded_local, &target_bytes, total_a, total_b, flags)?;
+    let (matched_local_indices, _) = execute_psi_intersection_chunks(
+        &blinded_local,
+        &target_bytes,
+        total_a,
+        total_b,
+        NONA_FLAG_FULL_PSI,
+    )?;
 
-    if flags == NONA_FLAG_FULL_PSI {
-        total_cardinality = matched_local_indices.len() as u64;
-    }
+    let total_cardinality = matched_local_indices.len() as u64;
 
     let mut matched_records = Vec::new();
     let mut original_indices = Vec::new();

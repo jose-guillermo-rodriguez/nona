@@ -74,6 +74,7 @@ pub fn ct_eq_32_bytes(a: &[u8; 32], b: &[u8; 32]) -> u64 {
 /// Constant-time volatile zeroization routine preventing DCE pruning.
 #[inline(never)]
 pub fn ct_zeroize(buf: &mut [u8]) {
+    compiler_fence(Ordering::SeqCst);
     for byte in buf.iter_mut() {
         unsafe {
             core::ptr::write_volatile(byte, 0);
@@ -684,7 +685,12 @@ fn sha512_process_block(state: &mut [u64; 8], block: &[u8; 128]) {
     state[6] = state[6].wrapping_add(g);
     state[7] = state[7].wrapping_add(h);
 
-    w.fill(0);
+    for slot in w.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(slot, 0);
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
 }
 
 
@@ -1590,6 +1596,7 @@ pub fn ecdsa_p384_sign_deterministic(
                         sig[..48].copy_from_slice(&r.to_be_bytes());
                         sig[48..96].copy_from_slice(&s.to_be_bytes());
                         ct_zeroize(&mut seed_buf);
+                        compiler_fence(Ordering::SeqCst);
                         return Some(sig);
                     }
                 }
@@ -1598,6 +1605,7 @@ pub fn ecdsa_p384_sign_deterministic(
         counter = counter.wrapping_add(1);
         if counter == 0 {
             ct_zeroize(&mut seed_buf);
+            compiler_fence(Ordering::SeqCst);
             return None;
         }
     }

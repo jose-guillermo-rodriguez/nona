@@ -204,23 +204,27 @@ fn test_c_abi_pipeline_timing_invariance() {
                 t_p1_sparse.push(s.elapsed().as_nanos());
 
                 let s = Instant::now();
-                assert_eq!(
-                    nona_phase2_intersect(
-                        in_a.0.as_ptr(), 128, in_a_clone.0.as_ptr(), 128, 4,
-                        indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
-                    ),
-                    0
-                );
+                for _ in 0..64 {
+                    assert_eq!(
+                        nona_phase2_intersect(
+                            in_a.0.as_ptr(), 128, in_a_clone.0.as_ptr(), 128, 4,
+                            indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
+                        ),
+                        0
+                    );
+                }
                 t_p2_full_match.push(s.elapsed().as_nanos());
 
                 let s = Instant::now();
-                assert_eq!(
-                    nona_phase2_intersect(
-                        in_a.0.as_ptr(), 128, in_b_disjoint.0.as_ptr(), 128, 4,
-                        indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
-                    ),
-                    0
-                );
+                for _ in 0..64 {
+                    assert_eq!(
+                        nona_phase2_intersect(
+                            in_a.0.as_ptr(), 128, in_b_disjoint.0.as_ptr(), 128, 4,
+                            indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
+                        ),
+                        0
+                    );
+                }
                 t_p2_zero_match.push(s.elapsed().as_nanos());
             } else {
                 let s = Instant::now();
@@ -238,23 +242,27 @@ fn test_c_abi_pipeline_timing_invariance() {
                 t_p1_uniform.push(s.elapsed().as_nanos());
 
                 let s = Instant::now();
-                assert_eq!(
-                    nona_phase2_intersect(
-                        in_a.0.as_ptr(), 128, in_b_disjoint.0.as_ptr(), 128, 4,
-                        indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
-                    ),
-                    0
-                );
+                for _ in 0..64 {
+                    assert_eq!(
+                        nona_phase2_intersect(
+                            in_a.0.as_ptr(), 128, in_b_disjoint.0.as_ptr(), 128, 4,
+                            indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
+                        ),
+                        0
+                    );
+                }
                 t_p2_zero_match.push(s.elapsed().as_nanos());
 
                 let s = Instant::now();
-                assert_eq!(
-                    nona_phase2_intersect(
-                        in_a.0.as_ptr(), 128, in_a_clone.0.as_ptr(), 128, 4,
-                        indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
-                    ),
-                    0
-                );
+                for _ in 0..64 {
+                    assert_eq!(
+                        nona_phase2_intersect(
+                            in_a.0.as_ptr(), 128, in_a_clone.0.as_ptr(), 128, 4,
+                            indices.0.as_mut_ptr(), 128, NONA_FLAG_FULL_PSI, &raw mut card.0
+                        ),
+                        0
+                    );
+                }
                 t_p2_full_match.push(s.elapsed().as_nanos());
             }
         }
@@ -269,11 +277,9 @@ fn test_c_abi_pipeline_timing_invariance() {
     let p2_delta = (mean_p2_m - mean_p2_z).abs() / mean_p2_m.max(1.0);
 
     println!("[GATE 5] C-ABI nona_phase1_blind key delta ratio: {:.4}%", p1_delta * 100.0);
-    println!("[GATE 5] C-ABI nona_phase2_intersect telemetry delta ratio: {:.4}%", p2_delta * 100.0);
+    println!("[GATE 5] C-ABI nona_phase2_intersect delta ratio: {:.4}%", p2_delta * 100.0);
 
     let threshold = if cfg!(debug_assertions) { 0.15 } else { 0.06 };
-    assert!(
-        p1_delta < threshold,
-        "Timing side-channel detected in nona_phase1_blind C-ABI pipeline!"
-    );
+    assert!(p1_delta < threshold, "Timing side-channel detected in nona_phase1_blind C-ABI pipeline! delta={:.4}% >= {:.2}%", p1_delta * 100.0, threshold * 100.0);
+    assert!(p2_delta < threshold, "Timing side-channel detected in nona_phase2_intersect C-ABI pipeline! delta={:.4}% >= {:.2}%", p2_delta * 100.0, threshold * 100.0);
 }
