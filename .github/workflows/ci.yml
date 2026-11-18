@@ -60,6 +60,25 @@ jobs:
           fi
           echo "[+] Verified: 0 dynamic allocation symbols found in staticlib."
 
+      - name: Assembly Constant-Time, Stack Ceiling & DSE Zeroization Audit
+        run: |
+          echo "[CI] Running assembly constant-time compaction, stack ceiling, and DSE zeroization audit..."
+          python3 tools/audit_assembly_ct_and_zeroize.py
+
+      - name: Constant-Time Taint-Tracking Verification (Valgrind / ctgrind)
+        run: |
+          if ! command -v valgrind &>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y valgrind
+          fi
+          if command -v valgrind &>/dev/null; then
+            echo "[CI] Compiling C-ABI test runner for Valgrind constant-time taint analysis..."
+            gcc -std=c99 -O1 -g -Iinclude tests/integration/c_runner.c target/release/libnona_core.a -lpthread -ldl -o /tmp/ctgrind_c_runner
+            valgrind --tool=memcheck --error-exitcode=1 --track-origins=yes /tmp/ctgrind_c_runner
+            rm -f /tmp/ctgrind_c_runner
+          else
+            echo "[CI] Valgrind unavailable on runner; skipping dynamic taint pass."
+          fi
+
   # ==========================================================================
   # JOB 1: Formal SMT Verification (Verus Engine)
   # ==========================================================================

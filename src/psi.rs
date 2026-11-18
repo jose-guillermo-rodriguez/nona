@@ -1047,6 +1047,7 @@ impl ProjectivePoint {
                     BATCH_CAP * core::mem::size_of::<FieldElement>(),
                 )
             });
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             return Err(err);
         }
 
@@ -1075,6 +1076,7 @@ impl ProjectivePoint {
                 BATCH_CAP * core::mem::size_of::<FieldElement>(),
             )
         });
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
         Ok(())
     }
@@ -1542,16 +1544,17 @@ unsafe fn execute_phase2_reblinding(
         if any_invalid != 0 {
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 points.as_mut_ptr().cast::<u8>(),
-                chunk_len * core::mem::size_of::<JacobianPoint>(),
+                BATCH_CAP * core::mem::size_of::<JacobianPoint>(),
             ));
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 affine_x.as_mut_ptr().cast::<u8>(),
-                chunk_len * core::mem::size_of::<FieldElement>(),
+                BATCH_CAP * core::mem::size_of::<FieldElement>(),
             ));
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 blinded_out,
                 n_elements * 32,
             ));
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             return crate::gatekeeper::NONA_ERR_INVALID_CURVE_POINT;
         }
 
@@ -1564,16 +1567,17 @@ unsafe fn execute_phase2_reblinding(
         } else {
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 points.as_mut_ptr().cast::<u8>(),
-                chunk_len * core::mem::size_of::<JacobianPoint>(),
+                BATCH_CAP * core::mem::size_of::<JacobianPoint>(),
             ));
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 affine_x.as_mut_ptr().cast::<u8>(),
-                chunk_len * core::mem::size_of::<FieldElement>(),
+                BATCH_CAP * core::mem::size_of::<FieldElement>(),
             ));
             crate::crypto::ct_zeroize(core::slice::from_raw_parts_mut(
                 blinded_out,
                 n_elements * 32,
             ));
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             return crate::gatekeeper::NONA_ERR_INVALID_CURVE_POINT;
         }
 
@@ -1819,8 +1823,10 @@ pub fn inject_differential_privacy_noise(raw_cardinality: u64, n_elements: usize
 #[cfg(not(verus))]
 /// Satisfies [FR-13-PHASE2INT]
 /// Satisfies [FR-18-ZEROREM]
-/// Executes constant-time Phase 2 set intersection and output array index population.
-#[inline]
+/// Executes constant-time Phase 2 set intersection with oblivious index compaction.
+/// Writes and cursor updates execute unconditionally on every candidate element using
+/// masked read-modify-write so match positions never alter control flow or memory access traces.
+#[inline(never)]
 #[allow(clippy::cast_possible_truncation)]
 unsafe fn execute_phase2_intersection(
     blinded_a: *const u8,
@@ -1832,10 +1838,20 @@ unsafe fn execute_phase2_intersection(
     flags: u32,
     cardinality_out: *mut u64,
 ) {
+    let has_out_buf = out_capacity >= 4 && !match_indices_out.is_null();
     if out_capacity > 0 && !match_indices_out.is_null() {
         let out_slice = core::slice::from_raw_parts_mut(match_indices_out, out_capacity);
         crate::crypto::ct_zeroize(out_slice);
     }
+
+    let is_full_psi = u64::from(flags == NONA_FLAG_FULL_PSI);
+    let can_emit_indices = is_full_psi & u64::from(has_out_buf);
+    let n_slots = if has_out_buf {
+        core::cmp::min(n_elements, out_capacity / 4)
+    } else {
+        0
+    };
+
     let mut cardinality: u64 = 0;
     let n_b = len_b / 32;
     for i in 0..n_elements {
@@ -1846,18 +1862,20 @@ unsafe fn execute_phase2_intersection(
             matched |=
                 crate::crypto::ct_eq_32_bytes(token_a, &*blinded_b.add(j * 32).cast::<[u8; 32]>());
         }
-        if flags == NONA_FLAG_FULL_PSI && matched == 1 {
-            let out_offset = (cardinality as usize) * 4;
-            if out_offset.saturating_add(4) <= out_capacity {
-                let idx_bytes = (i as u32).to_le_bytes();
-                core::ptr::copy_nonoverlapping(
-                    idx_bytes.as_ptr(),
-                    match_indices_out.add(out_offset),
-                    4,
-                );
-            }
+
+        let raw_slot = cardinality as usize;
+        let write_cond = can_emit_indices & matched;
+        for k in 0..n_slots {
+            let is_target = u64::from(k == raw_slot);
+            let mask32 = 0u32.wrapping_sub((write_cond & is_target & 1) as u32);
+            let target_ptr = match_indices_out.add(k * 4);
+            let existing_word =
+                u32::from_le_bytes(core::ptr::read_unaligned(target_ptr.cast::<[u8; 4]>()));
+            let compacted_word = ((i as u32) & mask32) | (existing_word & !mask32);
+            core::ptr::write_unaligned(target_ptr.cast::<[u8; 4]>(), compacted_word.to_le_bytes());
         }
-        cardinality += matched;
+
+        cardinality = cardinality.wrapping_add(matched);
     }
     let final_cardinality = if flags == NONA_FLAG_PSI_CA {
         inject_differential_privacy_noise(cardinality, n_elements)
@@ -2513,6 +2531,18 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
     let payload_mask = (has_payloads as u64).wrapping_neg();
     let index_mask = (has_payloads as usize).wrapping_neg();
 
+    let has_idx_buf = out_capacity >= 4 && !match_indices_out.is_null();
+    let n_idx_slots = if has_idx_buf {
+        core::cmp::min(n_elements, out_capacity / 4)
+    } else {
+        0
+    };
+    let n_pr_slots = if is_pr && !payloads_out.is_null() {
+        n_elements
+    } else {
+        0
+    };
+
     let mut i = 0;
     while i < n_elements && i < n_a {
         let elem_a = blinded_a.add(i * 32);
@@ -2532,23 +2562,35 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
             j += 1;
         }
 
-        if matched_element != 0 {
-            let card_idx = total_cardinality as usize;
+        let match_bit = matched_element & 1;
+        let match_mask64 = 0u64.wrapping_sub(match_bit);
+        let card_idx = total_cardinality as usize;
 
-            if !match_indices_out.is_null() && (card_idx * 4) + 4 <= out_capacity {
-                core::ptr::write_unaligned(
-                    match_indices_out.add(card_idx * 4).cast::<u32>(),
-                    i as u32,
-                );
-            }
-
-            if is_pr && card_idx < n_elements {
-                *payloads_out.add(card_idx) = element_payload_sum;
-            }
-
-            total_cardinality += 1;
-            total_sum = total_sum.wrapping_add(element_payload_sum);
+        let mut k_idx = 0;
+        while k_idx < n_idx_slots {
+            let is_target = u64::from(k_idx == card_idx);
+            let idx_mask32 = 0u32.wrapping_sub((match_bit & is_target) as u32);
+            let idx_ptr = match_indices_out.add(k_idx * 4);
+            let existing_idx =
+                u32::from_le_bytes(core::ptr::read_unaligned(idx_ptr.cast::<[u8; 4]>()));
+            let compacted_idx = ((i as u32) & idx_mask32) | (existing_idx & !idx_mask32);
+            core::ptr::write_unaligned(idx_ptr.cast::<[u8; 4]>(), compacted_idx.to_le_bytes());
+            k_idx += 1;
         }
+
+        let mut k_pr = 0;
+        while k_pr < n_pr_slots {
+            let is_target = u64::from(k_pr == card_idx);
+            let pr_mask64 = 0u64.wrapping_sub(match_bit & is_target);
+            let pr_ptr = payloads_out.add(k_pr);
+            let existing_pr = core::ptr::read(pr_ptr);
+            let compacted_pr = (element_payload_sum & pr_mask64) | (existing_pr & !pr_mask64);
+            core::ptr::write(pr_ptr, compacted_pr);
+            k_pr += 1;
+        }
+
+        total_cardinality = total_cardinality.wrapping_add(match_bit);
+        total_sum = total_sum.wrapping_add(element_payload_sum & match_mask64);
 
         i += 1;
     }

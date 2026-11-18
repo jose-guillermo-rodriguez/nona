@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: help all host verify-models test nostd lint formal formal-container gates linkage sanitizers bench container stack-container enclave container-all clean
+.PHONY: help all host verify-models test nostd lint formal formal-container gates linkage sanitizers assembly-audit bench container stack-container enclave container-all clean
 
 # Dynamic Container Engine Resolution (Podman > Docker)
 CONTAINER_BIN ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null || echo "")
@@ -89,11 +89,15 @@ sanitizers:
 	@echo "[HOST] Running native dynamic sanitizers (UBSan)..."
 	./tools/run_sanitizers.sh
 
+assembly-audit:
+	@echo "[HOST] Auditing assembly constant-time compaction, stack ceiling, and DSE zeroization..."
+	python3 tools/audit_assembly_ct_and_zeroize.py
+
 bench:
 	@echo "[HOST] Executing engine performance microbenchmarks..."
 	cargo bench --features std
 
-host: verify-models nostd sbom lint formal test gates linkage sanitizers
+host: verify-models nostd sbom lint formal test gates linkage sanitizers assembly-audit
 	@echo "======================================================================"
 	@echo " [✓] ALL HOST / NATIVE QA TARGETS PASSED CLEANLY"
 	@echo "======================================================================"
@@ -129,7 +133,7 @@ enclave: check-container-engine
 	@echo "[CONTAINER] Packaging reproducible AWS Nitro Enclave EIF & computing PCRs..."
 	./tools/build_nitro_eif.sh
 
-container-all: check-container-engine container stack-container enclave
+container-all: check-container-engine assembly-audit container stack-container enclave
 	@echo "======================================================================"
 	@echo " [✓] ALL HERMETIC CONTAINER QA TARGETS PASSED CLEANLY"
 	@echo "======================================================================"
