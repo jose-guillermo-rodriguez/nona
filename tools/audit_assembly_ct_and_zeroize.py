@@ -153,6 +153,8 @@ def compute_function_stack_bytes(lines: list[str], arch: str) -> int:
         sub_sp_re = re.compile(r"\bsub\s+sp,\s*sp,\s*(#?(?:0x[0-9a-fA-F]+|[0-9]+))", re.I)
         pre_idx_re = re.compile(r"\b(?:stp|str)\b[^\[]*\[sp,\s*#-(0x[0-9a-fA-F]+|[0-9]+)\]!", re.I)
         for ln in lines:
+            if re.search(r"\bret\b", ln, re.I):
+                break
             m1 = sub_sp_re.search(ln)
             if m1:
                 max_frame = max(max_frame, parse_immediate_bytes(m1.group(1)))
@@ -160,9 +162,10 @@ def compute_function_stack_bytes(lines: list[str], arch: str) -> int:
             if m2:
                 max_frame = max(max_frame, parse_immediate_bytes(m2.group(1)))
     else:
-        sub_rsp_intel = re.compile(r"\bsub\s+rsp,\s*(0x[0-9a-fA-F]+|[0-9]+)", re.I)
-        sub_rsp_att = re.compile(r"\bsubq?\s+\$(0x[0-9a-fA-F]+|[0-9]+),\s*%rsp", re.I)
+        sub_rsp_intel = re.compile(r"\bsub\s+rsp,\s*(0x[0-9a-fA-F]+|[0-9]+)\b", re.I)
+        sub_rsp_att = re.compile(r"\bsubq?\s+\$(0x[0-9a-fA-F]+|[0-9]+),\s*%rsp\b", re.I)
         callee_push_re = re.compile(r"\bpushq?\s+%?(?:rbp|rbx|r1[2-5])\b", re.I)
+        block_end_re = re.compile(r"\b(?:retq?|jmpq?|callq?|ud2|j[a-z]{1,4})\b", re.I)
         callee_pushes: set[str] = set()
         for ln in lines:
             m1 = sub_rsp_intel.search(ln)
@@ -175,8 +178,39 @@ def compute_function_stack_bytes(lines: list[str], arch: str) -> int:
             if m3:
                 reg = m3.group(0).split()[-1].lstrip("%").lower()
                 callee_pushes.add(reg)
+            if block_end_re.search(ln):
+                break
         max_frame += len(callee_pushes) * 8
     return max_frame
+
+
+def run_self_test() -> None:
+    x86_att = [
+        "0: 55 push %rbp",
+        "1: 41 57 push %r15",
+        "3: 48 81 ec 80 03 00 00 sub $0x380,%rsp",
+        "a: e8 00 00 00 00 callq 0xf",
+        "f: c3 retq",
+        "10: 48 81 ec 30 09 00 00 sub $0x930,%rsp",
+    ]
+    assert compute_function_stack_bytes(x86_att, "x86_64") == 0x380 + 16, "x86_64 AT&T prologue scan mismatch"
+
+    x86_intel_over = [
+        "0: 55 push rbp",
+        "1: 48 81 ec b0 05 00 00 sub rsp, 0x5b0",
+        "8: c3 ret",
+    ]
+    assert compute_function_stack_bytes(x86_intel_over, "x86_64") == 0x5b0 + 8, "x86_64 Intel overflow detection mismatch"
+
+    arm64 = [
+        "0: d1 10 03 ff sub sp, sp, #0x400",
+        "4: a9 bf 7b fd stp x29, x30, [sp, #-0x10]!",
+        "8: d6 5f 03 c0 ret",
+    ]
+    assert compute_function_stack_bytes(arm64, "aarch64") == 0x400, "aarch64 frame scan mismatch"
+    assert is_store_instruction("10: 48 c7 07 00 00 00 00 movq $0x0,(%rdi)", "x86_64")
+    assert is_store_instruction("10: f9 00 00 1f str xzr, [x0]", "aarch64")
+    print("  ✓ Assembly auditor self-test PASSED (x86_64 AT&T/Intel & aarch64 frame/store invariants).")
 
 
 def is_store_instruction(line: str, arch: str) -> bool:
@@ -280,4 +314,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--self-test" in sys.argv[1:]:
+        run_self_test()
+    else:
+        main()

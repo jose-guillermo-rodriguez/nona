@@ -1369,7 +1369,7 @@ impl FieldElement {
 }
 
 #[cfg(not(verus))]
-#[inline]
+#[inline(never)]
 /// Satisfies [FR-12-PHASE1BLIND]
 /// Satisfies [FR-06-PSIMALG]
 /// Satisfies [FR-11-STACKCEIL]
@@ -1512,7 +1512,7 @@ unsafe fn decompress_validate_and_blind_point(
 }
 
 #[cfg(not(verus))]
-#[inline]
+#[inline(never)]
 unsafe fn execute_phase2_reblinding(
     raw_in: *const u8,
     n_elements: usize,

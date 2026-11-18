@@ -302,7 +302,7 @@ if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' tools/audit_assembly_ct_and_zeroize.p
     echo "  [!] FAIL: Internal tracking codes detected in constant-time/assembly audit files."
     exit 1
 fi
-python3 tools/audit_assembly_ct_and_zeroize.py
+python3 tools/audit_assembly_ct_and_zeroize.py --self-test && python3 tools/audit_assembly_ct_and_zeroize.py
 echo "  ✓ Oblivious Phase 2 compaction, hard timing gate, DSE zeroization, and assembly spill audit verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
