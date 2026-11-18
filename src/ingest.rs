@@ -16,6 +16,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Global static zero-copy ring buffer for stream ingestion.
 static mut INGEST_RING_BUFFER: ZeroCopyRingBuffer = ZeroCopyRingBuffer::INIT;
 static INGEST_LOCK: AtomicBool = AtomicBool::new(false);
+pub const MAX_INGEST_FRAME_BYTES: usize = 4096;
+pub const MAX_INGEST_PAYLOAD_BYTES: usize = CAPACITY * CHUNK_SIZE;
 const MAX_SPIN_CYCLES: usize = 65_536;
 
 #[inline(always)]
@@ -59,35 +61,43 @@ fn acquire_ingest_lock() -> bool {
 /// Enforces non-null pointer validation, boundary safety, and thread-safe re-entrancy protection.
 pub unsafe fn process_ingest_stream_impl(stream_ptr: *const u8, len: usize) -> i32 {
     if stream_ptr.is_null() || len == 0 {
-        return -1;
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
     }
 
-    // Invariant: Enforce 128-byte framing alignment BEFORE acquiring lock to prevent poisoning
-    if !len.is_multiple_of(128) {
-        return -3;
+    // Enforce static payload ceiling and 128-byte framing alignment BEFORE acquiring lock
+    if len > MAX_INGEST_PAYLOAD_BYTES || !len.is_multiple_of(CHUNK_SIZE) {
+        return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+
+    if (stream_ptr as usize).checked_add(len).is_none() {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
     }
 
     // Acquire atomic spinlock guard with bounded backoff
     if !acquire_ingest_lock() {
-        return -4;
+        return crate::gatekeeper::NONA_ERR_LOCK_BUSY;
     }
 
-    let chunks = len / 128;
+    let chunks = len / CHUNK_SIZE;
     let ring = &mut *core::ptr::addr_of_mut!(INGEST_RING_BUFFER);
 
     // Pre-flight capacity invariant: abort immediately if remaining capacity is insufficient
     let available = ring.available_capacity();
     if chunks > available {
         INGEST_LOCK.store(false, Ordering::Release);
-        return -4;
+        return crate::gatekeeper::NONA_ERR_LOCK_BUSY;
     }
 
-    let mut status = 0;
+    let mut status = crate::gatekeeper::NONA_SUCCESS;
     for i in 0..chunks {
-        let chunk_ptr = stream_ptr.add(i * 128);
-        let chunk_ref = &*chunk_ptr.cast::<[u8; 128]>();
+        let Some(offset) = i.checked_mul(CHUNK_SIZE) else {
+            status = crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+            break;
+        };
+        let chunk_ptr = stream_ptr.add(offset);
+        let chunk_ref = &*chunk_ptr.cast::<[u8; CHUNK_SIZE]>();
         if ring.try_push(chunk_ref).is_err() {
-            status = -4;
+            status = crate::gatekeeper::NONA_ERR_LOCK_BUSY;
             break;
         }
     }
@@ -102,7 +112,7 @@ pub fn process_ingest_stream(data: &[u8]) -> Result<usize, IngestError> {
     if data.is_empty() {
         return Ok(0);
     }
-    if !data.len().is_multiple_of(128) {
+    if data.len() > MAX_INGEST_PAYLOAD_BYTES || !data.len().is_multiple_of(CHUNK_SIZE) {
         return Err(IngestError::InvalidAlignment);
     }
     let res = unsafe { process_ingest_stream_impl(data.as_ptr(), data.len()) };

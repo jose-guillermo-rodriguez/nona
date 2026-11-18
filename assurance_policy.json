@@ -1,12 +1,12 @@
 {
   "schema_version": "1.0.0",
   "active_release": "1.0.1",
-  "stage_gate": "track2-boundary-models",
+  "stage_gate": "track2-transport-perimeter",
   "thresholds": {
     "min_verified_smt_targets": 146,
     "max_external_body_axioms": 7,
     "max_stack_frame_bytes": 1408,
-    "min_hygiene_checks": 16
+    "min_hygiene_checks": 17
   },
   "gates": {
     "require_non_mutating_eif_manifest": true,

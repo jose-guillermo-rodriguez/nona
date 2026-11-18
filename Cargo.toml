@@ -156,3 +156,8 @@ required-features = ["std"]
 name = "test_attestation_negative"
 path = "tests/integration/test_attestation_negative.rs"
 required-features = ["std"]
+
+[[test]]
+name = "test_vsock_perimeter_bounds"
+path = "tests/integration/test_vsock_perimeter_bounds.rs"
+harness = false

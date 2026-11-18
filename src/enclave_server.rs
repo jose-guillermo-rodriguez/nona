@@ -22,9 +22,14 @@ pub const CMD_PING: u16 = 0x0001;
 pub const CMD_INGEST: u16 = 0x0002;
 pub const CMD_BLIND_PHASE1: u16 = 0x0003;
 pub const CMD_ATTEST: u16 = 0x0004;
+pub const CMD_PHASE2_REBLIND: u16 = 0x0005;
+pub const CMD_PHASE2_INTERSECT: u16 = 0x0006;
 
 pub const FLAG_USE_SESSION_KEY: u32 = 0x0001;
 pub const MAX_PAYLOAD_SIZE: usize = 16384;
+pub const MAX_WIRE_PAYLOAD_BYTES: usize = MAX_PAYLOAD_SIZE;
+pub const MAX_VSOCK_FRAME_BYTES: usize = EnclaveRequestHeader::WIRE_SIZE + MAX_WIRE_PAYLOAD_BYTES;
+pub const NONA_ERR_INVALID_PHASE: i32 = -103;
 
 /// Opaque wire status returned across vsock on any parsing, framing, or verification failure
 /// to suppress internal diagnostic oracles.
@@ -129,6 +134,81 @@ impl EnclaveRequestHeader {
             flags: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
             reserved,
         }
+    }
+
+    /// Validates header magic, version, opcode, reserved padding, and static payload/frame
+    /// ceilings strictly BEFORE reading payload bytes from an untrusted transport stream.
+    #[inline(never)]
+    pub fn validate_pre_payload(&self) -> Result<usize, i32> {
+        if self.magic != NONA_VSOCK_MAGIC {
+            return Err(-100);
+        }
+        if self.version != NONA_VSOCK_VERSION {
+            return Err(-101);
+        }
+        if self.reserved.iter().any(|&b| b != 0) {
+            return Err(-104);
+        }
+        let Ok(plen) = usize::try_from(self.payload_len) else {
+            return Err(-3);
+        };
+        if plen > MAX_WIRE_PAYLOAD_BYTES {
+            return Err(-3);
+        }
+        let Some(total_frame) = Self::WIRE_SIZE.checked_add(plen) else {
+            return Err(-3);
+        };
+        if total_frame > MAX_VSOCK_FRAME_BYTES {
+            return Err(-3);
+        }
+        match self.command {
+            CMD_PING => Ok(plen),
+            CMD_ATTEST => {
+                if plen > 64 {
+                    Err(-3)
+                } else {
+                    Ok(plen)
+                }
+            }
+            CMD_INGEST => {
+                if plen == 0 || plen > 4096 || !plen.is_multiple_of(128) {
+                    Err(-3)
+                } else {
+                    Ok(plen)
+                }
+            }
+            CMD_BLIND_PHASE1 | CMD_PHASE2_REBLIND => {
+                if plen == 0 || !plen.is_multiple_of(32) {
+                    Err(-3)
+                } else {
+                    Ok(plen)
+                }
+            }
+            CMD_PHASE2_INTERSECT => {
+                if plen < 16 {
+                    Err(-3)
+                } else {
+                    Ok(plen)
+                }
+            }
+            _ => Err(-102),
+        }
+    }
+
+    /// Parses and validates a fixed 64-byte wire header slice prior to payload ingestion.
+    #[inline(never)]
+    pub fn parse_wire_bytes(buf: &[u8]) -> Result<Self, i32> {
+        if buf.len() != Self::WIRE_SIZE {
+            return Err(-3);
+        }
+        if buf[32..Self::WIRE_SIZE].iter().any(|&b| b != 0) {
+            return Err(-104);
+        }
+        let mut fixed = [0u8; Self::WIRE_SIZE];
+        fixed.copy_from_slice(buf);
+        let hdr = Self::from_wire_bytes(&fixed);
+        let _ = hdr.validate_pre_payload()?;
+        Ok(hdr)
     }
 }
 
@@ -448,6 +528,355 @@ pub fn load_session_privkey_into(dest: &mut AlignedKeyBuffer) {
     }
 }
 
+/// Monotonic vsock session phase state aligned with `specs/vsock_session.tla`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SessionPhase {
+    Unattested,
+    AttestedBound,
+    Phase1Blinded,
+    Phase2Reblinded,
+    Phase2Intersected,
+    ClosedZeroized,
+}
+
+/// Per-connection session state machine enforcing monotonic phase transitions
+/// and fail-closed buffer zeroization on any protocol or framing anomaly.
+pub struct VsockSessionState {
+    phase: SessionPhase,
+    ops_in_session: u64,
+}
+
+impl Default for VsockSessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VsockSessionState {
+    pub const fn new() -> Self {
+        Self {
+            phase: SessionPhase::Unattested,
+            ops_in_session: 0,
+        }
+    }
+
+    pub const fn phase(&self) -> SessionPhase {
+        self.phase
+    }
+
+    pub const fn is_closed(&self) -> bool {
+        matches!(
+            self.phase,
+            SessionPhase::Phase2Intersected | SessionPhase::ClosedZeroized
+        )
+    }
+
+    /// Fail-closed transition: purges all active connection buffers with `write_volatile`
+    /// and a `SeqCst` fence, collapsing the session into `ClosedZeroized`.
+    #[inline(never)]
+    pub fn fail_closed_with_slot(&mut self, slot: &mut EnclaveConnectionSlot) {
+        slot.purge();
+        self.ops_in_session = 0;
+        self.phase = SessionPhase::ClosedZeroized;
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    }
+
+    const fn is_command_allowed(&self, cmd: u16) -> bool {
+        matches!(
+            (self.phase, cmd),
+            (
+                SessionPhase::Unattested
+                    | SessionPhase::AttestedBound
+                    | SessionPhase::Phase1Blinded
+                    | SessionPhase::Phase2Reblinded,
+                CMD_PING,
+            ) | (SessionPhase::Unattested, CMD_ATTEST)
+                | (SessionPhase::AttestedBound, CMD_INGEST | CMD_BLIND_PHASE1)
+                | (
+                    SessionPhase::Phase1Blinded,
+                    CMD_BLIND_PHASE1 | CMD_PHASE2_REBLIND
+                )
+                | (
+                    SessionPhase::Phase2Reblinded,
+                    CMD_PHASE2_REBLIND | CMD_PHASE2_INTERSECT
+                )
+        )
+    }
+
+    #[inline(never)]
+    pub fn dispatch_frame(
+        &mut self,
+        req_header: &EnclaveRequestHeader,
+        payload: &[u8],
+        slot: &mut EnclaveConnectionSlot,
+    ) -> (i32, u32) {
+        let res = self.dispatch_frame_buffers(
+            req_header,
+            payload,
+            &mut slot.out_buffer.data,
+            &mut slot.scratch_buffer,
+            &mut slot.attestation_doc,
+        );
+        if self.phase == SessionPhase::ClosedZeroized {
+            slot.purge();
+        }
+        res
+    }
+
+    #[inline(never)]
+    pub fn dispatch_frame_buffers(
+        &mut self,
+        req_header: &EnclaveRequestHeader,
+        payload: &[u8],
+        resp_payload: &mut [u8],
+        scratch_buffer: &mut EnclaveFrameBuffer,
+        attestation_doc: &mut AttestationDocumentBuffer,
+    ) -> (i32, u32) {
+        if self.is_closed() {
+            resp_payload.fill(0);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_WIRE_ERR_OPAQUE, 0);
+        }
+
+        let Ok(expected_plen) = req_header.validate_pre_payload() else {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_WIRE_ERR_OPAQUE, 0);
+        };
+        if payload.len() != expected_plen {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_WIRE_ERR_OPAQUE, 0);
+        }
+
+        if !self.is_command_allowed(req_header.command) {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_ERR_INVALID_PHASE, 0);
+        }
+
+        let Some(next_ops) = self.ops_in_session.checked_add(1) else {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_WIRE_ERR_OPAQUE, 0);
+        };
+        if next_ops > MAX_SESSION_OPS {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (NONA_WIRE_ERR_OPAQUE, 0);
+        }
+
+        let (status, out_len) = dispatch_frame_with_slot(
+            req_header,
+            payload,
+            resp_payload,
+            scratch_buffer,
+            attestation_doc,
+        );
+
+        #[cfg(feature = "std")]
+        let attestation_sim_pending =
+            req_header.command == CMD_ATTEST && status == crate::attestation::NONA_ERR_NSM_UNAVAILABLE;
+        #[cfg(not(feature = "std"))]
+        let attestation_sim_pending = false;
+
+        if status != 0 && !attestation_sim_pending {
+            ct_zeroize(resp_payload);
+            scratch_buffer.purge();
+            attestation_doc.purge();
+            self.ops_in_session = 0;
+            self.phase = SessionPhase::ClosedZeroized;
+            return (status, 0);
+        }
+
+        self.ops_in_session = next_ops;
+        self.phase = match req_header.command {
+            CMD_PING => self.phase,
+            CMD_ATTEST | CMD_INGEST => SessionPhase::AttestedBound,
+            CMD_BLIND_PHASE1 => SessionPhase::Phase1Blinded,
+            CMD_PHASE2_REBLIND => SessionPhase::Phase2Reblinded,
+            CMD_PHASE2_INTERSECT => SessionPhase::Phase2Intersected,
+            _ => {
+                ct_zeroize(resp_payload);
+                scratch_buffer.purge();
+                attestation_doc.purge();
+                self.ops_in_session = 0;
+                self.phase = SessionPhase::ClosedZeroized;
+                return (NONA_WIRE_ERR_OPAQUE, 0);
+            }
+        };
+
+        (status, out_len)
+    }
+}
+
+#[inline(never)]
+#[allow(clippy::cast_possible_truncation)]
+fn execute_wire_blinding_op(
+    is_phase2_reblind: bool,
+    flags: u32,
+    payload: &[u8],
+    resp_payload: &mut [u8],
+    scratch_buffer: &mut EnclaveFrameBuffer,
+) -> (i32, u32) {
+    let use_session_key = (flags & FLAG_USE_SESSION_KEY) != 0;
+    let elements_slice: &[u8] = if use_session_key {
+        if payload.is_empty() || !payload.len().is_multiple_of(32) {
+            return (-3, 0);
+        }
+        payload
+    } else {
+        if payload.len() < 64 || !payload.len().is_multiple_of(32) {
+            return (-3, 0);
+        }
+        &payload[32..]
+    };
+
+    let n_elements = elements_slice.len() / 32;
+    if n_elements == 0 || n_elements > 128 {
+        return (-3, 0);
+    }
+
+    let Some(elements_len) = n_elements.checked_mul(32) else {
+        return (-7, 0);
+    };
+    if resp_payload.len() < elements_len {
+        return (-8, 0);
+    }
+    if (resp_payload.as_ptr() as usize & 63) != 0 {
+        return (-2, 0);
+    }
+
+    let mut aligned_key = AlignedKeyBuffer { data: [0u8; 32] };
+    if use_session_key {
+        if advance_session_op_counter().is_err() {
+            return (-1, 0);
+        }
+        load_session_privkey_into(&mut aligned_key);
+    } else {
+        aligned_key.data.copy_from_slice(&payload[0..32]);
+    }
+
+    scratch_buffer.data[..elements_len].copy_from_slice(elements_slice);
+
+    let status = unsafe {
+        if is_phase2_reblind {
+            crate::nona_phase2_reblind(
+                scratch_buffer.data.as_ptr(),
+                elements_len,
+                n_elements,
+                aligned_key.data.as_ptr(),
+                resp_payload.as_mut_ptr(),
+                elements_len,
+            )
+        } else {
+            crate::nona_phase1_blind(
+                scratch_buffer.data.as_ptr(),
+                elements_len,
+                n_elements,
+                aligned_key.data.as_ptr(),
+                resp_payload.as_mut_ptr(),
+                elements_len,
+            )
+        }
+    };
+
+    ct_zeroize(&mut aligned_key.data);
+    scratch_buffer.purge();
+
+    let out_len = if status == 0 { elements_len as u32 } else { 0 };
+    (status, out_len)
+}
+
+#[inline(never)]
+#[allow(clippy::cast_possible_truncation)]
+fn execute_wire_phase2_intersect(
+    payload: &[u8],
+    resp_payload: &mut [u8],
+    scratch_buffer: &mut EnclaveFrameBuffer,
+) -> (i32, u32) {
+    if payload.len() < 16 {
+        return (-3, 0);
+    }
+    let psi_flags = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let n_a = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+    let n_b = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+    let reserved = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+    if reserved != 0 || n_a == 0 || n_a > 128 || n_b == 0 || n_b > 128 {
+        return (-3, 0);
+    }
+    let Some(len_a) = n_a.checked_mul(32) else {
+        return (-7, 0);
+    };
+    let Some(len_b) = n_b.checked_mul(32) else {
+        return (-7, 0);
+    };
+    let Some(expected_total) = 16usize.checked_add(len_a).and_then(|v| v.checked_add(len_b)) else {
+        return (-7, 0);
+    };
+    if payload.len() != expected_total {
+        return (-3, 0);
+    }
+    let Some(indices_bytes) = n_a.checked_mul(4) else {
+        return (-7, 0);
+    };
+    let Some(total_resp_bytes) = 64usize.checked_add(indices_bytes) else {
+        return (-7, 0);
+    };
+    if resp_payload.len() < total_resp_bytes || (resp_payload.as_ptr() as usize & 63) != 0 {
+        return (-2, 0);
+    }
+
+    // Copy set A into offset 0 (64-byte aligned) and set B into offset 4096 (64-byte aligned)
+    scratch_buffer.data[..len_a].copy_from_slice(&payload[16..16 + len_a]);
+    scratch_buffer.data[4096..4096 + len_b].copy_from_slice(&payload[16 + len_a..expected_total]);
+
+    #[repr(C, align(64))]
+    struct AlignedCard(u64);
+    let mut card = AlignedCard(0);
+
+    let (idx_area, header_area) = resp_payload.split_at_mut(indices_bytes);
+    let status = unsafe {
+        crate::nona_phase2_intersect(
+            scratch_buffer.data.as_ptr(),
+            len_a,
+            scratch_buffer.data.as_ptr().add(4096),
+            len_b,
+            n_a,
+            idx_area.as_mut_ptr(),
+            indices_bytes,
+            psi_flags,
+            &raw mut card.0,
+        )
+    };
+    scratch_buffer.purge();
+
+    if status != 0 {
+        ct_zeroize(resp_payload);
+        return (status, 0);
+    }
+    header_area[..8].copy_from_slice(&card.0.to_le_bytes());
+    (0, total_resp_bytes as u32)
+}
+
 #[inline(never)]
 #[allow(clippy::cast_possible_truncation)]
 pub fn dispatch_frame_with_slot(
@@ -463,7 +892,10 @@ pub fn dispatch_frame_with_slot(
     if req_header.version != NONA_VSOCK_VERSION {
         return (-101, 0); // NONA_ERR_INVALID_VERSION
     }
-    if payload.len() < req_header.payload_len as usize {
+    let Ok(header_plen) = usize::try_from(req_header.payload_len) else {
+        return (-3, 0);
+    };
+    if header_plen > MAX_WIRE_PAYLOAD_BYTES || payload.len() != header_plen {
         return (-3, 0); // NONA_ERR_LENGTH_BOUND_VIOLATION
     }
 
@@ -491,63 +923,22 @@ pub fn dispatch_frame_with_slot(
 
             (status, 0)
         }
-        CMD_BLIND_PHASE1 => {
-            let use_session_key = (req_header.flags & FLAG_USE_SESSION_KEY) != 0;
-            let elements_slice: &[u8] = if use_session_key {
-                if payload.is_empty() || !payload.len().is_multiple_of(32) {
-                    return (-3, 0);
-                }
-                payload
-            } else {
-                if payload.len() < 64 || !payload.len().is_multiple_of(32) {
-                    return (-3, 0);
-                }
-                &payload[32..]
-            };
-
-            let n_elements = elements_slice.len() / 32;
-            if n_elements == 0 || n_elements > 128 {
-                return (-3, 0);
-            }
-
-            let elements_len = n_elements * 32;
-            if resp_payload.len() < elements_len {
-                return (-8, 0);
-            }
-
-            if (resp_payload.as_ptr() as usize & 63) != 0 {
-                return (-2, 0);
-            }
-
-            let mut aligned_key = AlignedKeyBuffer { data: [0u8; 32] };
-            if use_session_key {
-                if advance_session_op_counter().is_err() {
-                    return (-1, 0);
-                }
-                load_session_privkey_into(&mut aligned_key);
-            } else {
-                aligned_key.data.copy_from_slice(&payload[0..32]);
-            }
-
-            scratch_buffer.data[..elements_len].copy_from_slice(elements_slice);
-
-            let status = unsafe {
-                crate::nona_phase1_blind(
-                    scratch_buffer.data.as_ptr(),
-                    elements_len,
-                    n_elements,
-                    aligned_key.data.as_ptr(),
-                    resp_payload.as_mut_ptr(),
-                    elements_len,
-                )
-            };
-
-            ct_zeroize(&mut aligned_key.data);
-            scratch_buffer.purge();
-
-            let out_len = if status == 0 { elements_len as u32 } else { 0 };
-
-            (status, out_len)
+        CMD_BLIND_PHASE1 => execute_wire_blinding_op(
+            false,
+            req_header.flags,
+            payload,
+            resp_payload,
+            scratch_buffer,
+        ),
+        CMD_PHASE2_REBLIND => execute_wire_blinding_op(
+            true,
+            req_header.flags,
+            payload,
+            resp_payload,
+            scratch_buffer,
+        ),
+        CMD_PHASE2_INTERSECT => {
+            execute_wire_phase2_intersect(payload, resp_payload, scratch_buffer)
         }
         CMD_ATTEST => {
             let client_nonce: Option<&[u8]> = if payload.is_empty() {
@@ -573,7 +964,12 @@ pub fn dispatch_frame_with_slot(
             };
 
             let (status, out_len) = if status == 0 {
-                let total_needed = SECP256K1_PUBKEY_COMPRESSED_SIZE + attestation_doc.actual_len;
+                let Some(total_needed) =
+                    SECP256K1_PUBKEY_COMPRESSED_SIZE.checked_add(attestation_doc.actual_len)
+                else {
+                    attestation_doc.purge();
+                    return (NONA_ERR_ATTEST_OVERFLOW, 0);
+                };
                 if total_needed > resp_payload.len()
                     || attestation_doc.actual_len == 0
                     || attestation_doc.actual_len > ATTESTATION_MAX_DOC_SIZE
@@ -720,6 +1116,8 @@ pub unsafe fn handle_enclave_client_with_staging(
     client_fd: libc::c_int,
     slot: &mut EnclaveConnectionSlot,
 ) {
+    let mut session = VsockSessionState::new();
+
     loop {
         let mut req_wire = [0u8; EnclaveRequestHeader::WIRE_SIZE];
         if recv_exact(
@@ -729,34 +1127,52 @@ pub unsafe fn handle_enclave_client_with_staging(
         )
         .is_err()
         {
+            session.fail_closed_with_slot(slot);
             break;
         }
         let frame_start_ns = monotonic_now_ns();
-        let req_header = EnclaveRequestHeader::from_wire_bytes(&req_wire);
 
-        let plen = req_header.payload_len as usize;
-        if req_header.magic != NONA_VSOCK_MAGIC
-            || req_header.version != NONA_VSOCK_VERSION
-            || plen > MAX_PAYLOAD_SIZE
-        {
-            slot.purge();
+        // Validate fixed header and static frame/payload ceilings strictly BEFORE reading payload bytes.
+        let Ok(req_header) = EnclaveRequestHeader::parse_wire_bytes(&req_wire) else {
+            session.fail_closed_with_slot(slot);
+            enforce_wire_frame_floor(frame_start_ns);
+            let err_hdr = EnclaveResponseHeader {
+                magic: NONA_VSOCK_MAGIC,
+                version: NONA_VSOCK_VERSION,
+                status: NONA_WIRE_ERR_OPAQUE,
+                payload_len: 0,
+                reserved: [0u8; 20],
+            };
+            let _ = send_exact(
+                client_fd,
+                err_hdr.to_wire_bytes().as_ptr(),
+                EnclaveResponseHeader::WIRE_SIZE,
+            );
+            break;
+        };
+
+        let Ok(plen) = usize::try_from(req_header.payload_len) else {
+            session.fail_closed_with_slot(slot);
             enforce_wire_frame_floor(frame_start_ns);
             break;
-        }
+        };
 
         if plen > 0 && recv_exact(client_fd, slot.in_buffer.data.as_mut_ptr(), plen).is_err() {
-            slot.purge();
+            session.fail_closed_with_slot(slot);
             enforce_wire_frame_floor(frame_start_ns);
             break;
         }
 
-        let (raw_status, raw_resp_len) = dispatch_frame_with_slot(
+        let (raw_status, raw_resp_len) = session.dispatch_frame_buffers(
             &req_header,
             &slot.in_buffer.data[..plen],
             &mut slot.out_buffer.data,
             &mut slot.scratch_buffer,
             &mut slot.attestation_doc,
         );
+        if session.phase() == SessionPhase::ClosedZeroized {
+            slot.purge();
+        }
 
         let (wire_status, wire_resp_len) = if raw_status == 0 {
             (0, raw_resp_len)
@@ -764,7 +1180,7 @@ pub unsafe fn handle_enclave_client_with_staging(
             slot.purge();
             (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0)
         } else {
-            slot.purge();
+            session.fail_closed_with_slot(slot);
             (NONA_WIRE_ERR_OPAQUE, 0)
         };
 
@@ -786,28 +1202,37 @@ pub unsafe fn handle_enclave_client_with_staging(
         )
         .is_err()
         {
+            session.fail_closed_with_slot(slot);
             break;
         }
-        if wire_resp_len > 0
-            && send_exact(
-                client_fd,
-                slot.out_buffer.data.as_ptr(),
-                wire_resp_len as usize,
-            )
-            .is_err()
-        {
-            break;
+        if wire_resp_len > 0 {
+            let Ok(resp_len_usize) = usize::try_from(wire_resp_len) else {
+                session.fail_closed_with_slot(slot);
+                break;
+            };
+            if resp_len_usize > MAX_WIRE_PAYLOAD_BYTES
+                || send_exact(
+                    client_fd,
+                    slot.out_buffer.data.as_ptr(),
+                    resp_len_usize,
+                )
+                .is_err()
+            {
+                session.fail_closed_with_slot(slot);
+                break;
+            }
         }
 
         slot.purge();
 
         // Fail-closed session termination: immediately close connection on any protocol/verification error
         if wire_status != 0 && wire_status != crate::attestation::NONA_ERR_NSM_UNAVAILABLE {
+            session.fail_closed_with_slot(slot);
             break;
         }
     }
 
-    slot.purge();
+    session.fail_closed_with_slot(slot);
     libc::close(client_fd);
 }
 

@@ -849,8 +849,23 @@ pub unsafe extern "C" fn nona_permute_index(
         return -1;
     }
 
-    if (circuit_ptr as usize) & 63 != 0 || (permuted_index_ptr as usize) & 7 != 0 {
+    let circuit_addr = circuit_ptr as usize;
+    let out_addr = permuted_index_ptr as usize;
+    if (circuit_addr & 63) != 0 || (out_addr & 7) != 0 {
         return -2;
+    }
+
+    let circuit_size = core::mem::size_of::<IndexPermutationCircuit>();
+    let out_size = core::mem::size_of::<u64>();
+    let (Some(circuit_end), Some(out_end)) = (
+        circuit_addr.checked_add(circuit_size),
+        out_addr.checked_add(out_size),
+    ) else {
+        return -7;
+    };
+
+    if !(circuit_end <= out_addr || out_end <= circuit_addr) {
+        return -5;
     }
 
     let circuit = &*circuit_ptr;
