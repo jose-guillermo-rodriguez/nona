@@ -1382,7 +1382,7 @@ unsafe fn execute_phase1_blinding(
     blinded_out: *mut u8,
 ) {
     let key_scalar = unsafe { Scalar::from_bytes_le(key_bytes) };
-    const BATCH_CAP: usize = 8;
+    const BATCH_CAP: usize = 2;
     let mut chunk_start = 0;
 
     while chunk_start < n_elements {
@@ -1520,7 +1520,7 @@ unsafe fn execute_phase2_reblinding(
     blinded_out: *mut u8,
 ) -> i32 {
     let key_scalar = unsafe { Scalar::from_bytes_le(key_bytes) };
-    const BATCH_CAP: usize = 4;
+    const BATCH_CAP: usize = 2;
     let mut chunk_start = 0;
 
     while chunk_start < n_elements {

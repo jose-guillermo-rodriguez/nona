@@ -18,7 +18,7 @@ use nona_core::client::{NonaClient, DEFAULT_UNIX_SOCKET_PATH};
 #[cfg(feature = "std")]
 use nona_core::normalization::normalize_to_buffer;
 #[cfg(feature = "std")]
-use nona_core::psi::{nona_phase2_intersect, NONA_FLAG_FULL_PSI};
+use nona_core::psi::{nona_phase2_intersect, NONA_FLAG_FULL_PSI, NONA_FLAG_PSI_CA};
 
 #[cfg(not(feature = "std"))]
 fn main() {}
@@ -745,15 +745,24 @@ fn run_match(config: &CliConfig) -> Result<(), (String, i32)> {
     let total_a = elements.len();
     let total_b = target_bytes.len() / 32;
 
-    let (matched_local_indices, _) = execute_psi_intersection_chunks(
+    let psi_flags = if config.cardinality_only {
+        NONA_FLAG_PSI_CA
+    } else {
+        NONA_FLAG_FULL_PSI
+    };
+    let (matched_local_indices, ca_cardinality) = execute_psi_intersection_chunks(
         &blinded_local,
         &target_bytes,
         total_a,
         total_b,
-        NONA_FLAG_FULL_PSI,
+        psi_flags,
     )?;
 
-    let total_cardinality = matched_local_indices.len() as u64;
+    let total_cardinality = if config.cardinality_only {
+        ca_cardinality
+    } else {
+        matched_local_indices.len() as u64
+    };
 
     let mut matched_records = Vec::new();
     let mut original_indices = Vec::new();

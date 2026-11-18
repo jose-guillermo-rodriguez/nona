@@ -162,8 +162,8 @@ def compute_function_stack_bytes(lines: list[str], arch: str) -> int:
     else:
         sub_rsp_intel = re.compile(r"\bsub\s+rsp,\s*(0x[0-9a-fA-F]+|[0-9]+)", re.I)
         sub_rsp_att = re.compile(r"\bsubq?\s+\$(0x[0-9a-fA-F]+|[0-9]+),\s*%rsp", re.I)
-        push_re = re.compile(r"\bpushq?\b", re.I)
-        push_bytes = 0
+        callee_push_re = re.compile(r"\bpushq?\s+%?(?:rbp|rbx|r1[2-5])\b", re.I)
+        callee_pushes: set[str] = set()
         for ln in lines:
             m1 = sub_rsp_intel.search(ln)
             if m1:
@@ -171,9 +171,11 @@ def compute_function_stack_bytes(lines: list[str], arch: str) -> int:
             m2 = sub_rsp_att.search(ln)
             if m2:
                 max_frame = max(max_frame, parse_immediate_bytes(m2.group(1)))
-            if push_re.search(ln):
-                push_bytes += 8
-        max_frame = max(max_frame, push_bytes)
+            m3 = callee_push_re.search(ln)
+            if m3:
+                reg = m3.group(0).split()[-1].lstrip("%").lower()
+                callee_pushes.add(reg)
+        max_frame += len(callee_pushes) * 8
     return max_frame
 
 
@@ -219,6 +221,8 @@ def main() -> None:
     peak_bytes = 0
     stack_violations: list[tuple[str, str, int]] = []
     for member, sym, lines in records:
+        if not (member.startswith("nona_core") or sym.startswith(("nona_core::", "nona_"))):
+            continue
         frame_bytes = compute_function_stack_bytes(lines, arch)
         if frame_bytes > peak_bytes:
             peak_bytes = frame_bytes
