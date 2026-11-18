@@ -170,6 +170,7 @@ pub unsafe fn register_active_buffer(ptr: *mut u8, len: usize) {
 
 /// Satisfies [FR-05-RAMCLR]
 /// Unregisters and fences global active volatile buffer.
+#[inline(never)]
 pub unsafe fn unregister_active_buffer() {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     ACTIVE_BUFFER.store(core::ptr::null_mut(), core::sync::atomic::Ordering::SeqCst);
