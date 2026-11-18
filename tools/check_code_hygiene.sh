@@ -281,6 +281,29 @@ if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' tests/integration/test_vsock_perimete
     exit 1
 fi
 echo "  ✓ Bounded vsock/wire framing and C-ABI FFI perimeter test registration verified."
+echo "--> Check 18: Enforcing oblivious Phase 2 compaction, hard timing gate, DSE zeroization & assembly audit..."
+if [ ! -f "tools/audit_assembly_ct_and_zeroize.py" ]; then
+    echo "  [!] FAIL: Missing assembly constant-time, stack-ceiling & DSE zeroization auditor: tools/audit_assembly_ct_and_zeroize.py"
+    exit 1
+fi
+if grep -rnE 'if flags == NONA_FLAG_FULL_PSI && matched == 1' src/psi.rs >/dev/null 2>&1; then
+    echo "  [!] FAIL: Secret-dependent branch 'if flags == NONA_FLAG_FULL_PSI && matched == 1' still present in src/psi.rs."
+    exit 1
+fi
+if ! grep -rnE 'assert!\(.*p2_delta' tests/integration/test_timing_boundaries.rs >/dev/null 2>&1; then
+    echo "  [!] FAIL: tests/integration/test_timing_boundaries.rs must enforce a hard assert!() gate on p2_delta."
+    exit 1
+fi
+if ! grep -q "audit_assembly_ct_and_zeroize.py" Makefile || ! grep -q "audit_assembly_ct_and_zeroize.py" .github/workflows/ci.yml; then
+    echo "  [!] FAIL: Makefile and .github/workflows/ci.yml must wire tools/audit_assembly_ct_and_zeroize.py into release/toolchain gates."
+    exit 1
+fi
+if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' tools/audit_assembly_ct_and_zeroize.py tests/integration/test_timing_boundaries.rs 2>/dev/null; then
+    echo "  [!] FAIL: Internal tracking codes detected in constant-time/assembly audit files."
+    exit 1
+fi
+python3 tools/audit_assembly_ct_and_zeroize.py
+echo "  ✓ Oblivious Phase 2 compaction, hard timing gate, DSE zeroization, and assembly spill audit verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
 echo "=========================================================="
