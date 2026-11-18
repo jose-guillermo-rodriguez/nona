@@ -441,7 +441,16 @@ pub unsafe extern "C" fn nona_adaptive_psi_route(
     out_route_id: *mut u32,
 ) -> i32 {
     if out_route_id.is_null() {
-        return -1; // NONA_ERR_NULL_POINTER
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
+    }
+    if (out_route_id as usize) & 3 != 0 {
+        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
+    }
+    if (out_route_id as usize)
+        .checked_add(core::mem::size_of::<u32>())
+        .is_none()
+    {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
     }
 
     let (route_id, _) = match ct_adaptive_route_decision(n_elements, m_elements) {

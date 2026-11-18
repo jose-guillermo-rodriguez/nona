@@ -142,6 +142,8 @@ pub unsafe fn nona_validate_ffi_bounds_impl(
         || in_len > MAX_BUFFER_CAPACITY
         || key_len == 0
         || key_len > MAX_BUFFER_CAPACITY
+        || expected_out_len == 0
+        || expected_out_len > MAX_BUFFER_CAPACITY
         || out_len < expected_out_len
     {
         return NONA_ERR_LENGTH_BOUND_VIOLATION;
@@ -189,6 +191,13 @@ pub unsafe fn nona_gatekeeper_validate_impl(
     // Spatial buffer disjointness verification
     if !is_disjoint(payload_ptr, payload_len, expected_hash, DIGEST_LEN) {
         return NONA_ERR_BUFFER_ALIASING;
+    }
+
+    if payload_len == 0 || payload_len > MAX_BUFFER_CAPACITY {
+        return NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+    if cardinality == 0 || cardinality > MAX_ELEMENT_COUNT {
+        return NONA_ERR_ELEMENT_COUNT_BOUND_VIOLATION;
     }
 
     let mut scratch = GatekeeperScratchpad::new();

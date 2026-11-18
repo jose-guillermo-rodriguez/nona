@@ -249,7 +249,13 @@ pub extern "C" fn nona_core_init() -> i32 {
 /// Satisfies [FR-10-PSIMATCH]
 /// Inner wrapper evaluating single-stage PSI matching circuit over validated pointer.
 unsafe fn process_psi_state(state: *mut psi::PsiCircuitState) -> i32 {
-    validate_ffi_ptr!(state, 64, -2);
+    validate_ffi_ptr!(state, 64, NONA_ERR_NULL_POINTER);
+    if (state as usize)
+        .checked_add(core::mem::size_of::<psi::PsiCircuitState>())
+        .is_none()
+    {
+        return NONA_ERR_POINTER_WRAPAROUND;
+    }
     psi::evaluate_match_circuit(&mut *state);
     0
 }
@@ -267,8 +273,15 @@ pub extern "C" fn nona_core_process(state: *mut psi::PsiCircuitState) -> i32 {
 /// C-ABI export for constant-time volatile memory zeroization.
 #[no_mangle]
 pub unsafe extern "C" fn nona_ct_zeroize(ptr: *mut u8, len: usize) -> i32 {
+    assert_stack_boundary!();
     if ptr.is_null() {
         return NONA_ERR_NULL_POINTER;
+    }
+    if len == 0 || len > 16384 {
+        return NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+    if (ptr as usize).checked_add(len).is_none() {
+        return NONA_ERR_POINTER_WRAPAROUND;
     }
     let slice = core::slice::from_raw_parts_mut(ptr, len);
     crypto::ct_zeroize(slice);
@@ -314,13 +327,45 @@ pub unsafe extern "C" fn nona_normalize_and_obfuscate(
     output_code: *mut normalization::SanitizedCode,
     out_permuted_index: *mut u64,
 ) -> i32 {
-    validate_ffi_ptr!(input_ptr, input_len, 1, -1, input_slice);
-    validate_ffi_ptr!(output_code, 64, -1);
-    validate_ffi_ptr!(out_permuted_index, 8, -1);
+    validate_ffi_ptr!(input_ptr, 1, NONA_ERR_NULL_POINTER);
+    validate_ffi_ptr!(output_code, 64, NONA_ERR_NULL_POINTER);
+    validate_ffi_ptr!(out_permuted_index, 8, NONA_ERR_NULL_POINTER);
 
-    let status = normalization::normalize_to_buffer(input_slice, &mut (*output_code).data);
+    if input_len == 0 || input_len > 64 {
+        return NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+    if (input_ptr as usize).checked_add(input_len).is_none()
+        || (output_code as usize)
+            .checked_add(core::mem::size_of::<normalization::SanitizedCode>())
+            .is_none()
+        || (out_permuted_index as usize)
+            .checked_add(core::mem::size_of::<u64>())
+            .is_none()
+    {
+        return NONA_ERR_POINTER_WRAPAROUND;
+    }
+
+    let out_code_ptr = output_code.cast_const().cast::<u8>();
+    let out_idx_ptr = out_permuted_index.cast_const().cast::<u8>();
+    if !gatekeeper::is_disjoint(input_ptr, input_len, out_code_ptr, 64)
+        || !gatekeeper::is_disjoint(input_ptr, input_len, out_idx_ptr, 8)
+        || !gatekeeper::is_disjoint(out_code_ptr, 64, out_idx_ptr, 8)
+    {
+        return NONA_ERR_BUFFER_ALIASING;
+    }
+
+    let input_slice = core::slice::from_raw_parts(input_ptr, input_len);
+    let status = if input_len == 64 {
+        normalization::normalize_to_buffer(input_slice, &mut (*output_code).data)
+    } else {
+        let mut padded_in = [0u8; 64];
+        padded_in[..input_len].copy_from_slice(input_slice);
+        let rc = normalization::normalize_to_buffer(&padded_in, &mut (*output_code).data);
+        crypto::ct_zeroize(&mut padded_in);
+        rc
+    };
     if status != 1 {
-        return -1;
+        return NONA_ERR_INVALID_PARAM;
     }
     let parsed_val = parse_sanitized_to_u64(&*output_code);
     let circuit = obfuscation::IndexPermutationCircuit::new(a, c);
@@ -340,8 +385,24 @@ pub unsafe extern "C" fn nona_process_exception_step(
     e_i: u8,
     window_buffer: *mut u8,
 ) -> i32 {
-    validate_ffi_ptr!(ecb, 64, -1);
-    validate_ffi_ptr!(window_buffer, 64, -1);
+    validate_ffi_ptr!(ecb, 64, NONA_ERR_NULL_POINTER);
+    validate_ffi_ptr!(window_buffer, 64, NONA_ERR_NULL_POINTER);
+
+    if (ecb as usize)
+        .checked_add(core::mem::size_of::<exception::ExceptionControlBlock>())
+        .is_none()
+        || (window_buffer as usize).checked_add(64).is_none()
+    {
+        return NONA_ERR_POINTER_WRAPAROUND;
+    }
+    if !gatekeeper::is_disjoint(
+        ecb.cast_const().cast::<u8>(),
+        64,
+        window_buffer.cast_const(),
+        64,
+    ) {
+        return NONA_ERR_BUFFER_ALIASING;
+    }
 
     let ecb_ref = &mut *ecb;
     ecb_ref.update_write_cursor(e_i);
@@ -363,9 +424,12 @@ pub unsafe extern "C" fn nona_process_exception_step(
 /// Satisfies [FR-19-FFIBND]
 /// Zero-copy stream ingestion C-ABI export into N=128 ring manifold.
 pub unsafe extern "C" fn nona_ingest_stream(stream_ptr: *const u8, len: usize) -> i32 {
-    crate::validate_ffi_ptr!(stream_ptr, 64, -1);
-    if len > 4096 {
-        return -3;
+    crate::validate_ffi_ptr!(stream_ptr, 64, NONA_ERR_NULL_POINTER);
+    if len == 0 || len > 4096 || !len.is_multiple_of(128) {
+        return NONA_ERR_LENGTH_BOUND_VIOLATION;
+    }
+    if (stream_ptr as usize).checked_add(len).is_none() {
+        return NONA_ERR_POINTER_WRAPAROUND;
     }
     crate::ingest::process_ingest_stream_impl(stream_ptr, len)
 }
@@ -381,9 +445,7 @@ pub unsafe extern "C" fn nona_gatekeeper_validate(
     cardinality: usize,
     expected_hash: *const u8,
 ) -> i32 {
-    validate_ffi_ptr!(payload_ptr, payload_len, 1, -1, _slice);
-    validate_ffi_ptr!(expected_hash, 1, -1);
-
+    assert_stack_boundary!();
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     gatekeeper::nona_gatekeeper_validate_impl(payload_ptr, payload_len, cardinality, expected_hash)
 }

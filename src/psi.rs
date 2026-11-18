@@ -1446,7 +1446,10 @@ pub unsafe fn nona_phase1_blind_impl(
     if gate_res != NONA_SUCCESS {
         return gate_res;
     }
-    if in_len < n_elements.wrapping_mul(32) {
+    let Some(required_in_len) = n_elements.checked_mul(32) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
+    if in_len < required_in_len || !in_len.is_multiple_of(32) {
         return NONA_ERR_LENGTH_BOUND_VIOLATION;
     }
     execute_phase1_blinding(raw_in, n_elements, key_bytes, blinded_out);
@@ -1614,7 +1617,10 @@ pub unsafe fn nona_phase2_reblind_impl(
     if gate_res != crate::gatekeeper::NONA_SUCCESS {
         return gate_res;
     }
-    if in_len < n_elements.wrapping_mul(32) {
+    let Some(required_in_len) = n_elements.checked_mul(32) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
+    if in_len < required_in_len || !in_len.is_multiple_of(32) {
         return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
     }
     execute_phase2_reblinding(raw_in, n_elements, key_bytes, blinded_out)
@@ -1653,9 +1659,15 @@ unsafe fn validate_phase2_params(
     cardinality_out: *mut u64,
 ) -> i32 {
     crate::validate_ffi_ptr!(cardinality_out, 8, NONA_ERR_NULL_POINTER);
+    if (cardinality_out as usize).checked_add(8).is_none() {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    }
     if flags != NONA_FLAG_FULL_PSI && flags != NONA_FLAG_PSI_CA {
         return NONA_ERR_INVALID_FLAGS;
     }
+    let Some(expected_out_bytes) = n_elements.checked_mul(4) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
     let gate_res = nona_validate_ffi_bounds_impl(
         blinded_a,
         len_a,
@@ -1664,10 +1676,16 @@ unsafe fn validate_phase2_params(
         len_b,
         match_indices_out,
         out_capacity,
-        n_elements * 4,
+        expected_out_bytes,
     );
     if gate_res != NONA_SUCCESS {
         return gate_res;
+    }
+    let Some(required_len_a) = n_elements.checked_mul(32) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
+    if len_a < required_len_a || !len_a.is_multiple_of(32) || !len_b.is_multiple_of(32) {
+        return NONA_ERR_LENGTH_BOUND_VIOLATION;
     }
     if !is_disjoint(
         blinded_a,
@@ -2365,6 +2383,24 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
     sum_out: *mut u64,
 ) -> i32 {
     crate::validate_ffi_ptr!(cardinality_out, 8, NONA_ERR_NULL_POINTER);
+    if (cardinality_out as usize).checked_add(8).is_none() {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    }
+    if (flags & !(NONA_FLAG_PSI_PR | NONA_FLAG_PSI_SUM)) != 0 {
+        return crate::gatekeeper::NONA_ERR_INVALID_FLAGS;
+    }
+    let is_pr = (flags & NONA_FLAG_PSI_PR) != 0;
+    let is_sum = (flags & NONA_FLAG_PSI_SUM) != 0;
+    if is_sum {
+        crate::validate_ffi_ptr!(sum_out, 8, crate::gatekeeper::NONA_ERR_NULL_POINTER);
+        if (sum_out as usize).checked_add(8).is_none() {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        }
+    }
+
+    let Some(expected_out_bytes) = n_elements.checked_mul(4) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
     let val_gate = crate::gatekeeper::nona_validate_ffi_bounds_impl(
         blinded_a,
         len_a,
@@ -2373,10 +2409,17 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
         len_b,
         match_indices_out,
         out_capacity,
-        n_elements * 4,
+        expected_out_bytes,
     );
     if val_gate != crate::gatekeeper::NONA_SUCCESS {
         return val_gate;
+    }
+
+    let Some(required_len_a) = n_elements.checked_mul(32) else {
+        return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+    };
+    if len_a < required_len_a || !len_a.is_multiple_of(32) || !len_b.is_multiple_of(32) {
+        return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
     }
 
     let n_a = len_a / 32;
@@ -2386,45 +2429,74 @@ pub unsafe extern "C" fn nona_phase2_intersect_payload(
         return crate::gatekeeper::NONA_ERR_LENGTH_BOUND_VIOLATION;
     }
 
-    if (flags & !(NONA_FLAG_PSI_PR | NONA_FLAG_PSI_SUM)) != 0 {
-        return crate::gatekeeper::NONA_ERR_INVALID_FLAGS;
-    }
-
-    let is_pr = (flags & NONA_FLAG_PSI_PR) != 0;
-    let is_sum = (flags & NONA_FLAG_PSI_SUM) != 0;
-
-    if is_pr && (payloads_b.is_null() || payloads_out.is_null()) {
-        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
-    }
-
-    if is_pr && (((payloads_b as usize) | (payloads_out as usize)) & 7) != 0 {
-        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
+    let card_ptr = cardinality_out.cast_const().cast::<u8>();
+    if !is_disjoint(blinded_a, len_a, card_ptr, 8)
+        || !is_disjoint(blinded_b, len_b, card_ptr, 8)
+        || !is_disjoint(match_indices_out.cast_const(), out_capacity, card_ptr, 8)
+    {
+        return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
     }
 
     if is_sum {
-        crate::validate_ffi_ptr!(sum_out, 8, crate::gatekeeper::NONA_ERR_NULL_POINTER);
+        let sum_ptr = sum_out.cast_const().cast::<u8>();
+        if !is_disjoint(blinded_a, len_a, sum_ptr, 8)
+            || !is_disjoint(blinded_b, len_b, sum_ptr, 8)
+            || !is_disjoint(match_indices_out.cast_const(), out_capacity, sum_ptr, 8)
+            || !is_disjoint(card_ptr, 8, sum_ptr, 8)
+        {
+            return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
+        }
     }
 
-    if is_pr {
+    if (is_pr || is_sum) && payloads_b.is_null() {
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
+    }
+    if is_pr && payloads_out.is_null() {
+        return crate::gatekeeper::NONA_ERR_NULL_POINTER;
+    }
+    if !payloads_b.is_null() && ((payloads_b as usize) & 7) != 0 {
+        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
+    }
+    if is_pr && ((payloads_out as usize) & 7) != 0 {
+        return crate::gatekeeper::NONA_ERR_UNALIGNED_POINTER;
+    }
+
+    if !payloads_b.is_null() {
         let Some(payloads_b_bytes) = n_b.checked_mul(8) else {
             return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
         };
-        let Some(payloads_out_bytes) = n_elements.checked_mul(8) else {
-            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
-        };
         let pb_ptr = payloads_b.cast::<u8>();
-        let po_ptr = payloads_out.cast_const().cast::<u8>();
-        if !crate::gatekeeper::is_disjoint(pb_ptr, payloads_b_bytes, po_ptr, payloads_out_bytes)
-            || !crate::gatekeeper::is_disjoint(blinded_a, len_a, po_ptr, payloads_out_bytes)
-            || !crate::gatekeeper::is_disjoint(blinded_b, len_b, po_ptr, payloads_out_bytes)
-            || !crate::gatekeeper::is_disjoint(
-                match_indices_out.cast_const(),
-                out_capacity,
-                po_ptr,
-                payloads_out_bytes,
-            )
+        if (pb_ptr as usize).checked_add(payloads_b_bytes).is_none() {
+            return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+        }
+        if !is_disjoint(pb_ptr, payloads_b_bytes, match_indices_out.cast_const(), out_capacity)
+            || !is_disjoint(pb_ptr, payloads_b_bytes, card_ptr, 8)
+            || (is_sum && !is_disjoint(pb_ptr, payloads_b_bytes, sum_out.cast_const().cast::<u8>(), 8))
         {
             return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
+        }
+        if is_pr {
+            let Some(payloads_out_bytes) = n_elements.checked_mul(8) else {
+                return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+            };
+            let po_ptr = payloads_out.cast_const().cast::<u8>();
+            if (po_ptr as usize).checked_add(payloads_out_bytes).is_none() {
+                return crate::gatekeeper::NONA_ERR_POINTER_WRAPAROUND;
+            }
+            if !is_disjoint(pb_ptr, payloads_b_bytes, po_ptr, payloads_out_bytes)
+                || !is_disjoint(blinded_a, len_a, po_ptr, payloads_out_bytes)
+                || !is_disjoint(blinded_b, len_b, po_ptr, payloads_out_bytes)
+                || !is_disjoint(
+                    match_indices_out.cast_const(),
+                    out_capacity,
+                    po_ptr,
+                    payloads_out_bytes,
+                )
+                || !is_disjoint(po_ptr, payloads_out_bytes, card_ptr, 8)
+                || (is_sum && !is_disjoint(po_ptr, payloads_out_bytes, sum_out.cast_const().cast::<u8>(), 8))
+            {
+                return crate::gatekeeper::NONA_ERR_BUFFER_ALIASING;
+            }
         }
     }
 
