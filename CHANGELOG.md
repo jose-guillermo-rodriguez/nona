@@ -2,6 +2,19 @@
 
 All notable changes to Nona Core Engine are documented in this file.
 
+## [1.0.2] - 2026-11-18
+
+### Formal Boundary & Hardware Semantics Specifications
+- Added exhaustive TLA+ `AF_VSOCK` session state machine (`specs/vsock_session.tla`, `specs/vsock_session.cfg`) and `make verify-models` verification target enforcing phase monotonicity and fail-closed zeroization under adversarial packet drop, replay, reordering, and truncation.
+- Expanded `docs/THREAT_MODEL.md` with STPA control-loop hazard analysis and PASTA threat decomposition covering untrusted shared-memory rings, L3/SMT microarchitectural timing channels, and hypervisor clock-skew (time-warp) attacks.
+- Authored `docs/HARDWARE_SEMANTICS.md` analyzing `x86_64` Total Store Order (TSO) vs. `aarch64` weak memory ordering, speculative execution barriers, Dead-Store Elimination (DSE) prevention, and CPU errata surfaces.
+
+### Transport Perimeter, Constant-Time Compaction & Zeroization Hardening
+- Enforced bounded $O(N)$ vsock/wire framing (`MAX_VSOCK_FRAME_BYTES`), checked integer length arithmetic, session phase monotonicity, and defensive C-ABI pointer/alignment/disjointness checks (`src/ingest.rs`, `src/enclave_server.rs`, `src/bin/nona_enclave.rs`, `tests/integration/test_vsock_perimeter_bounds.rs`).
+- Replaced secret-dependent Phase 2 intersection index branching with oblivious constant-time compaction (`src/psi.rs`) and enforced a hard timing regression gate (`tests/integration/test_timing_boundaries.rs`).
+- Hardened ephemeral secret lifetimes with `core::ptr::write_volatile` paired with `core::sync::atomic::compiler_fence(Ordering::SeqCst)` and added cross-architecture (`x86_64` and `aarch64`) disassembly constant-time, DSE zeroization, and `<= 1408 B` stack-ceiling verification (`tools/audit_assembly_ct_and_zeroize.py`).
+- Introduced the declarative Lemniscate Assurance Ratchet (`assurance_policy.json` + `tools/verify_assurance_ratchet.py`) anchoring policy thresholds, boolean gates, and C-ABI symbol introspection to git history.
+
 ## [1.0.1] - 2026-11-13
 
 ### Security & Formal Verification (Hardening Pass 1)

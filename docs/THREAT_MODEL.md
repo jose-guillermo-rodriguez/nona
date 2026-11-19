@@ -1,6 +1,6 @@
 # Nona Core Engine: Threat Model & Adversarial Host Boundaries
 
-**Specification Version:** 1.0.1-HARDENING  
+**Specification Version:** 1.0.2-HARDENING  
 **Classification:** Authoritative Security Architecture, STPA Hazard Analysis & PASTA Threat Decomposition  
 **Target Environments:** AWS Nitro Enclaves (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) | `#![no_std]` Bare-Metal  
 

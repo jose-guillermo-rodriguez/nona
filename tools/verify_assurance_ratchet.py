@@ -197,6 +197,19 @@ def enforce_sealed_floor(thresholds: dict, gates: dict) -> None:
 def verify_live_ground_truth(policy: dict) -> None:
     thresholds = policy["thresholds"]
 
+    # 0. Active release parity against Cargo.toml
+    cargo_toml = Path("Cargo.toml")
+    if not cargo_toml.is_file():
+        fail("Missing Cargo.toml.")
+    m_ver = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml.read_text(encoding="utf-8"), re.M)
+    if not m_ver:
+        fail("Could not parse crate version from Cargo.toml.")
+    if m_ver.group(1) != policy["active_release"]:
+        fail(
+            f"Release parity violation: assurance_policy.json active_release "
+            f"({policy['active_release']!r}) != Cargo.toml ({m_ver.group(1)!r})."
+        )
+
     # 1. Verus SMT verification log ground truth
     verus_log = Path("proofs/verus_verification.log")
     if not verus_log.is_file():
