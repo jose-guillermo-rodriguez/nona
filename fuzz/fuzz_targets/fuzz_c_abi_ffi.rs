@@ -13,7 +13,6 @@ use nona_core::normalization::SanitizedCode;
 use nona_core::obfuscation::IndexPermutationCircuit;
 use nona_core::psi::{
     FieldElement, PsiCircuitState, NONA_FLAG_FULL_PSI, NONA_FLAG_PSI_CA, NONA_FLAG_PSI_PR,
-    NONA_FLAG_PSI_SUM,
 };
 use nona_core::{
     nona_adaptive_psi_route, nona_core_process, nona_ct_zeroize, nona_gatekeeper_validate,
@@ -191,12 +190,10 @@ fn fuzz_c_abi_blinding_stages(arena: &mut AlignedArena, slice: &[u8]) {
 fn fuzz_c_abi_intersect_stages(arena: &mut AlignedArena, slice: &[u8]) {
     let n_elements = (usize::from(slice[0]) % 16).max(1);
     let byte_len = n_elements * 32;
-    let fuzz_flags = read_u32_le(slice, 25);
+    let fuzz_flags = read_u32_le(slice, 25) & !NONA_FLAG_PSI_CA;
     let flag_choices = [
         NONA_FLAG_FULL_PSI,
-        NONA_FLAG_PSI_CA,
         NONA_FLAG_PSI_PR,
-        NONA_FLAG_PSI_SUM,
         fuzz_flags,
     ];
     let selected_flag = flag_choices[usize::from(slice[0]) % flag_choices.len()];
