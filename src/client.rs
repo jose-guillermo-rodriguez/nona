@@ -150,6 +150,14 @@ impl Write for TransportStream {
     }
 }
 
+/// Hardware-measured `(PCR0, PCR1, PCR2)` triple extracted from an NSM attestation document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttestedPcrTriple {
+    pub pcr0: [u8; 48],
+    pub pcr1: [u8; 48],
+    pub pcr2: [u8; 48],
+}
+
 pub struct NonaClient {
     stream: TransportStream,
     pub session_pubkey: [u8; 33],
@@ -1211,6 +1219,51 @@ impl NonaClient {
             trusted_root_der,
             verified_unix_secs,
         )
+    }
+
+    /// Extracts the hardware-measured `(PCR0, PCR1, PCR2)` triple from an NSM `COSE_Sign1`
+    /// attestation document without external manifest dependencies.
+    #[inline(never)]
+    pub fn extract_cose_attestation_pcrs(
+        doc_bytes: &[u8],
+    ) -> Result<AttestedPcrTriple, ClientError> {
+        let effective_doc_bytes = Self::peel_outer_nsm_envelope(doc_bytes)?;
+        let mut parser = CborParser::new(&effective_doc_bytes);
+        let effective_root = &parser.parse_value()?;
+        if !parser.is_eof() {
+            return Err(ClientError::CborParseError);
+        }
+        let cose_array = match effective_root {
+            CborValue::Tag(18, inner) => match inner.as_ref() {
+                CborValue::Array(arr) if arr.len() == 4 => arr,
+                _ => return Err(ClientError::CborParseError),
+            },
+            CborValue::Array(arr) if arr.len() == 4 => arr,
+            _ => return Err(ClientError::CborParseError),
+        };
+        let CborValue::Bytes(payload_bytes) = &cose_array[2] else {
+            return Err(ClientError::CborParseError);
+        };
+        let claims = Self::extract_attestation_payload_claims(payload_bytes)?;
+        let p0_slice = claims.pcr0.ok_or(ClientError::PcrMismatch(
+            "PCR0 missing from attestation document",
+        ))?;
+        let p1_slice = claims.pcr1.ok_or(ClientError::PcrMismatch(
+            "PCR1 missing from attestation document",
+        ))?;
+        let p2_slice = claims.pcr2.ok_or(ClientError::PcrMismatch(
+            "PCR2 missing from attestation document",
+        ))?;
+        let p0: [u8; 48] = p0_slice
+            .try_into()
+            .map_err(|_| ClientError::PcrMismatch("PCR0 invalid length (expected 48 bytes)"))?;
+        let p1: [u8; 48] = p1_slice
+            .try_into()
+            .map_err(|_| ClientError::PcrMismatch("PCR1 invalid length (expected 48 bytes)"))?;
+        let p2: [u8; 48] = p2_slice
+            .try_into()
+            .map_err(|_| ClientError::PcrMismatch("PCR2 invalid length (expected 48 bytes)"))?;
+        Ok(AttestedPcrTriple { pcr0: p0, pcr1: p1, pcr2: p2 })
     }
 
     #[inline(never)]
