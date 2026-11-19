@@ -31,6 +31,7 @@ REQUIRED_GATES = (
     "require_kms_recipient_binding",
     "require_spec_fuzzing",
     "require_continuous_fuzzing",
+    "require_external_audit_dossier",
 )
 
 RUNTIME_ABI_EXCLUSIONS = {
@@ -75,7 +76,7 @@ def validate_policy_schema(doc: object, label: str, *, is_baseline: bool = False
         fail(f"{label}.gates must be a JSON object.")
 
     required_gates = (
-        tuple(g for g in REQUIRED_GATES if g not in ("require_spec_fuzzing", "require_continuous_fuzzing"))
+        tuple(g for g in REQUIRED_GATES if g not in ("require_spec_fuzzing", "require_continuous_fuzzing", "require_external_audit_dossier"))
         if is_baseline
         else REQUIRED_GATES
     )
@@ -451,6 +452,16 @@ def verify_introspection_and_gates(policy: dict) -> None:
         if "fuzz" not in ci_text.lower():
             fail("gates.require_continuous_fuzzing is true, but .github/workflows/ci.yml lacks continuous fuzzing step.")
         print("  ✓ Stage gate active: continuous fuzzing CI harness enforced.")
+
+    # 6. External cryptanalysis & independent security audit dossier gate
+    if gates["require_external_audit_dossier"]:
+        dossier = Path("docs/EXTERNAL_AUDIT_DOSSIER.md")
+        if not dossier.is_file():
+            fail("gates.require_external_audit_dossier is true, but docs/EXTERNAL_AUDIT_DOSSIER.md is missing.")
+        makefile_text = Path("Makefile").read_text(encoding="utf-8") if Path("Makefile").is_file() else ""
+        if not re.search(r"^audit-bundle:", makefile_text, re.M):
+            fail("gates.require_external_audit_dossier is true, but Makefile lacks 'audit-bundle:' target.")
+        print("  ✓ Stage gate active: external cryptanalysis & audit readiness dossier enforced.")
 
 def main() -> None:
     policy_path = Path("assurance_policy.json")

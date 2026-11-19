@@ -374,6 +374,26 @@ if ! grep -q 'fuzz_c_abi_ffi' .github/workflows/ci.yml || ! grep -q 'fuzz_kms_en
     exit 1
 fi
 echo "  ✓ Continuous libFuzzer targets and CI regression harness verified."
+echo "--> Check 22: Enforcing external cryptanalysis readiness dossier & reproducible audit bundle..."
+if [ ! -f "docs/EXTERNAL_AUDIT_DOSSIER.md" ]; then
+    echo "  [!] FAIL: Missing external cryptanalysis & security audit dossier: docs/EXTERNAL_AUDIT_DOSSIER.md"
+    exit 1
+fi
+for section in "System Architecture" "Trusted Computing Base" "291" "DDH" "KMS" "Reproducibility"; do
+    if ! grep -qiE "$section" docs/EXTERNAL_AUDIT_DOSSIER.md; then
+        echo "  [!] FAIL: docs/EXTERNAL_AUDIT_DOSSIER.md missing required audit coverage: $section"
+        exit 1
+    fi
+done
+if ! grep -qE '^audit-bundle:' Makefile; then
+    echo "  [!] FAIL: Makefile must define 'audit-bundle:' target."
+    exit 1
+fi
+if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' docs/EXTERNAL_AUDIT_DOSSIER.md 2>/dev/null; then
+    echo "  [!] FAIL: Internal tracking codes detected in docs/EXTERNAL_AUDIT_DOSSIER.md."
+    exit 1
+fi
+echo "  ✓ External cryptanalysis readiness dossier and audit bundle verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
 echo "=========================================================="

@@ -1,7 +1,7 @@
 # Security Policy & Threat Model
 
 **Specification Version:** 1.0.0-RELEASE  
-**Baseline Implementation:** Release v1.0.0 Formally Verified & Sealed  
+**Baseline Implementation:** Release v1.1.0 Formally Verified & Sealed  
 
 **Project:** Nona Core Engine  
 **Classification:** Confidential Computing & OEM High-Assurance Cryptographic Substrate  
@@ -66,6 +66,13 @@ Even under hostile physical memory tap or unexpected instance termination:
 ## 4. Coordinated Vulnerability Disclosure (CVD)
 
 We welcome vulnerability reports from security researchers and auditors under our Coordinated Vulnerability Disclosure process.
+
+### 4.0 Supported Versions
+
+| Version | Supported | Release Status |
+| :--- | :---: | :--- |
+| `1.1.x` (`1.1.0`) | Yes | Active Track 3 Sealed Release (`291` SMT targets, `3` TCB sites) |
+| `< 1.1.0` | No | Superseded by `v1.1.0` |
 
 ### 4.1 Reporting a Security Vulnerability
 

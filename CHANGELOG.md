@@ -2,6 +2,20 @@
 
 All notable changes to Nona Core Engine are documented in this file.
 
+## [1.1.0] - 2026-11-19
+
+### Zero-Assumption TCB Burn-Down & Formal Cryptographic Reductions
+- Discharged all 4 remaining arithmetic `#[verifier::external_body]` axioms in `src/psi.rs` (`FieldElement::mul`, `add_nocarry`, `sub_noborrow`, `lemma_multi_limb_bit_to_nat`), reducing the live TCB from `7 -> 3` irreducible OS/hardware syscall boundaries (`0` arithmetic axioms) and scaling machine-checked Verus SMT verification from `229 -> 291` targets (`103` ghost lemmas + `188` executive/boundary contracts, `0` errors).
+- Authored machine-checked cryptographic security reductions in `proofs/crypto_reductions.rs` (`62` SMT targets) proving prime-order cyclic subgroup exponent algebra, constructive Extended Euclidean Bezout modular inverses, DH-PSI soundness and completeness, Decisional Diffie-Hellman (DDH) self-randomizability and non-DDH gap preservation, and 256-bit/64-bit XOR one-time-pad payload confidentiality.
+- Added automated fail-closed Verus specification mutation testing (`tools/fuzz_verus_specs.py`, `make spec-fuzz`) achieving a 100% mutant kill rate across formal contracts.
+
+### Attested AWS KMS Recipient Binding & Continuous Fuzzing
+- Implemented attested AWS KMS `Recipient` key-release binding (`AttestedKeyEnvelope` in `src/crypto.rs`, `CMD_KMS_RECIPIENT_UNWRAP` in `src/enclave_server.rs`, `docs/KMS_ATTESTATION.md`, `tests/integration/test_kms_recipient_binding.rs`), cryptographically binding ephemeral `secp256k1` public keys into `/dev/nsm` attestation `user_data` with pinned `PCR0`/`PCR1`/`PCR2` enforcement, single-use nonce replay defense, and immediate volatile zeroization (`write_volatile` + `SeqCst`).
+- Expanded the continuous ASan + SanitizerCoverage libFuzzer suite across all 4 untrusted perimeter harnesses (`fuzz_c_abi_ffi`, `fuzz_kms_envelope`, `fuzz_ingest`, `fuzz_wire_dispatch`) and fixed bare-metal `x86_64-unknown-none` `AttestedKeyEnvelope` public-key derivation in `src/crypto.rs`.
+
+### External Cryptanalysis & Security Audit Readiness
+- Authored the self-contained external cryptanalysis and independent security audit dossier (`docs/EXTERNAL_AUDIT_DOSSIER.md`) and added the deterministic `make audit-bundle` verification orchestrator, sealing `assurance_policy.json` at `v1.1.0` (`track3-external-audit-sealed`).
+
 ## [1.0.2] - 2026-11-18
 
 ### Formal Boundary & Hardware Semantics Specifications
