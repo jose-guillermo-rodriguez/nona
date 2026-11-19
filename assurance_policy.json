@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0.0",
   "active_release": "1.0.2",
-  "stage_gate": "track2-sealed",
+  "stage_gate": "track3-tcb-burndown",
   "thresholds": {
-    "min_verified_smt_targets": 146,
-    "max_external_body_axioms": 7,
+    "min_verified_smt_targets": 156,
+    "max_external_body_axioms": 3,
     "max_stack_frame_bytes": 1408,
     "min_hygiene_checks": 18
   },
