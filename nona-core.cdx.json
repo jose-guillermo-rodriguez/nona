@@ -19,52 +19,52 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "pkg:cargo/nona-core@1.0.1",
+      "bom-ref": "pkg:cargo/nona-core@1.0.2",
       "author": "Jose Guillermo Rodriguez <jose-guillermo-rodriguez@users.noreply.github.com>",
       "name": "nona-core",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "scope": "required",
       "licenses": [
         {
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/nona-core@1.0.1",
+      "purl": "pkg:cargo/nona-core@1.0.2",
       "components": [
         {
           "type": "library",
-          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-0",
+          "bom-ref": "pkg:cargo/nona-core@1.0.2 bin-target-0",
           "name": "nona_core",
-          "version": "1.0.1",
-          "purl": "pkg:cargo/nona-core@1.0.1#src/lib.rs"
+          "version": "1.0.2",
+          "purl": "pkg:cargo/nona-core@1.0.2#src/lib.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-1",
+          "bom-ref": "pkg:cargo/nona-core@1.0.2 bin-target-1",
           "name": "fuzz_ingest",
-          "version": "1.0.1",
-          "purl": "pkg:cargo/nona-core@1.0.1#fuzz/fuzz_targets/fuzz_ingest.rs"
+          "version": "1.0.2",
+          "purl": "pkg:cargo/nona-core@1.0.2#fuzz/fuzz_targets/fuzz_ingest.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-2",
+          "bom-ref": "pkg:cargo/nona-core@1.0.2 bin-target-2",
           "name": "fuzz_wire_dispatch",
-          "version": "1.0.1",
-          "purl": "pkg:cargo/nona-core@1.0.1#fuzz/fuzz_targets/fuzz_wire_dispatch.rs"
+          "version": "1.0.2",
+          "purl": "pkg:cargo/nona-core@1.0.2#fuzz/fuzz_targets/fuzz_wire_dispatch.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-3",
+          "bom-ref": "pkg:cargo/nona-core@1.0.2 bin-target-3",
           "name": "nona",
-          "version": "1.0.1",
-          "purl": "pkg:cargo/nona-core@1.0.1#src/bin/nona.rs"
+          "version": "1.0.2",
+          "purl": "pkg:cargo/nona-core@1.0.2#src/bin/nona.rs"
         },
         {
           "type": "application",
-          "bom-ref": "pkg:cargo/nona-core@1.0.1 bin-target-4",
+          "bom-ref": "pkg:cargo/nona-core@1.0.2 bin-target-4",
           "name": "nona_enclave",
-          "version": "1.0.1",
-          "purl": "pkg:cargo/nona-core@1.0.1#src/bin/nona_enclave.rs"
+          "version": "1.0.2",
+          "purl": "pkg:cargo/nona-core@1.0.2#src/bin/nona_enclave.rs"
         }
       ]
     },
@@ -105,10 +105,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.206",
       "author": "David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com>",
       "name": "proc-macro2",
-      "version": "1.0.106",
+      "version": "1.0.206",
       "description": "A substitute implementation of the compiler's `proc_macro` API to decouple token-based libraries from the procedural macro use case.",
       "scope": "required",
       "hashes": [
@@ -122,7 +122,7 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/proc-macro2@1.0.106",
+      "purl": "pkg:cargo/proc-macro2@1.0.206",
       "externalReferences": [
         {
           "type": "documentation",
@@ -292,7 +292,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:cargo/nona-core@1.0.1",
+      "ref": "pkg:cargo/nona-core@1.0.2",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186",
         "registry+https://github.com/rust-lang/crates.io-index#zeroize@1.9.0"
@@ -302,7 +302,7 @@
       "ref": "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.186"
     },
     {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.206",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.24"
       ]
@@ -310,13 +310,13 @@
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.46",
       "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106"
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.206"
       ]
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#syn@2.0.118",
       "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.206",
         "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.46",
         "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.24"
       ]
@@ -333,7 +333,7 @@
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#zeroize_derive@1.5.0",
       "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
+        "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.206",
         "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.46",
         "registry+https://github.com/rust-lang/crates.io-index#syn@2.0.118"
       ]

@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0.0",
-  "crate_version": "1.0.1",
+  "crate_version": "1.0.2",
   "enclave_name": "nona_enclave",
   "target_architecture": "x86_64-unknown-linux-musl",
   "container_platform": "linux/amd64",
