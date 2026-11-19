@@ -1378,24 +1378,14 @@ pub fn evaluate_match_circuit(state: &mut PsiCircuitState) -> FieldElement {
 impl FieldElement {
     #[inline(always)]
     pub unsafe fn from_bytes_le(ptr: *const u8) -> Self {
-        let mut limbs = [0u64; 4];
-        core::ptr::copy_nonoverlapping(ptr, limbs.as_mut_ptr().cast::<u8>(), 32);
-        limbs[0] = u64::from_le(limbs[0]);
-        limbs[1] = u64::from_le(limbs[1]);
-        limbs[2] = u64::from_le(limbs[2]);
-        limbs[3] = u64::from_le(limbs[3]);
-        Self { limbs }
+        Self {
+            limbs: crate::crypto::limbs256_from_bytes_le(ptr),
+        }
     }
 
     #[inline(always)]
     pub unsafe fn to_bytes_le(&self, ptr: *mut u8) {
-        let limbs_le = [
-            self.limbs[0].to_le(),
-            self.limbs[1].to_le(),
-            self.limbs[2].to_le(),
-            self.limbs[3].to_le(),
-        ];
-        core::ptr::copy_nonoverlapping(limbs_le.as_ptr().cast::<u8>(), ptr, 32);
+        crate::crypto::limbs256_to_bytes_le(&self.limbs, ptr);
     }
 }
 

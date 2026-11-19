@@ -126,9 +126,12 @@ jobs:
 
       - name: Cache & Execute TLA+ TLC Model Checker (specs/vsock_session.tla)
         run: |
+          if ! command -v java >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y default-jre-headless
+          fi
           mkdir -p ~/.tla
-          if [ ! -f ~/.tla/tla2tools.jar ]; then
-            curl -sSL "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar" -o ~/.tla/tla2tools.jar
+          if [ ! -s ~/.tla/tla2tools.jar ]; then
+            curl -fsSL --retry 3 "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar" -o ~/.tla/tla2tools.jar
           fi
           java -version
           TLA2TOOLS_JAR=~/.tla/tla2tools.jar make verify-models

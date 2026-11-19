@@ -364,24 +364,14 @@ impl Scalar {
 
     #[inline(always)]
     pub unsafe fn from_bytes_le(ptr: *const u8) -> Self {
-        let mut limbs = [0u64; 4];
-        core::ptr::copy_nonoverlapping(ptr, limbs.as_mut_ptr().cast::<u8>(), 32);
-        limbs[0] = u64::from_le(limbs[0]);
-        limbs[1] = u64::from_le(limbs[1]);
-        limbs[2] = u64::from_le(limbs[2]);
-        limbs[3] = u64::from_le(limbs[3]);
-        Self { limbs }
+        Self {
+            limbs: limbs256_from_bytes_le(ptr),
+        }
     }
 
     #[inline(always)]
     pub unsafe fn to_bytes_le(&self, ptr: *mut u8) {
-        let limbs_le = [
-            self.limbs[0].to_le(),
-            self.limbs[1].to_le(),
-            self.limbs[2].to_le(),
-            self.limbs[3].to_le(),
-        ];
-        core::ptr::copy_nonoverlapping(limbs_le.as_ptr().cast::<u8>(), ptr, 32);
+        limbs256_to_bytes_le(&self.limbs, ptr);
     }
 
     pub fn add(&self, other: &Self) -> Self {
@@ -403,6 +393,26 @@ impl Scalar {
         let limbs = reduce_scalar_512(&r);
         Self { limbs }
     }
+}
+
+pub(crate) unsafe fn limbs256_from_bytes_le(ptr: *const u8) -> [u64; 4] {
+    let mut limbs = [0u64; 4];
+    core::ptr::copy_nonoverlapping(ptr, limbs.as_mut_ptr().cast::<u8>(), 32);
+    limbs[0] = u64::from_le(limbs[0]);
+    limbs[1] = u64::from_le(limbs[1]);
+    limbs[2] = u64::from_le(limbs[2]);
+    limbs[3] = u64::from_le(limbs[3]);
+    limbs
+}
+
+pub(crate) unsafe fn limbs256_to_bytes_le(limbs: &[u64; 4], ptr: *mut u8) {
+    let limbs_le = [
+        limbs[0].to_le(),
+        limbs[1].to_le(),
+        limbs[2].to_le(),
+        limbs[3].to_le(),
+    ];
+    core::ptr::copy_nonoverlapping(limbs_le.as_ptr().cast::<u8>(), ptr, 32);
 }
 
 /// Satisfies [FR-31-ADAPTVOLE]
@@ -1800,22 +1810,10 @@ pub struct AttestedKeyEnvelope {
 }
 
 #[inline(never)]
-pub fn ct_eq_16_bytes(a: &[u8; 16], b: &[u8; 16]) -> u64 {
+pub fn ct_eq_fixed<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u64 {
     let mut d: u64 = 0;
     let mut i = 0;
-    while i < 16 {
-        d |= (a[i] ^ b[i]) as u64;
-        i += 1;
-    }
-    compiler_fence(Ordering::SeqCst);
-    ((d | 0u64.wrapping_sub(d)) >> 63) ^ 1
-}
-
-#[inline(never)]
-pub fn ct_eq_48_bytes(a: &[u8; 48], b: &[u8; 48]) -> u64 {
-    let mut d: u64 = 0;
-    let mut i = 0;
-    while i < 48 {
+    while i < N {
         d |= (a[i] ^ b[i]) as u64;
         i += 1;
     }
@@ -2065,9 +2063,9 @@ fn unwrap_attested_recipient_envelope_inner(
     if ct_eq_32_bytes(&envelope.challenge_nonce, expected_nonce) != 1 {
         return Err(AttestedEnvelopeError::NonceMismatch);
     }
-    let pcr_ok = ct_eq_48_bytes(&envelope.pcr0, expected_pcr0)
-        & ct_eq_48_bytes(&envelope.pcr1, expected_pcr1)
-        & ct_eq_48_bytes(&envelope.pcr2, expected_pcr2);
+    let pcr_ok = ct_eq_fixed(&envelope.pcr0, expected_pcr0)
+        & ct_eq_fixed(&envelope.pcr1, expected_pcr1)
+        & ct_eq_fixed(&envelope.pcr2, expected_pcr2);
     if pcr_ok != 1 {
         return Err(AttestedEnvelopeError::PcrMismatch);
     }
@@ -2102,7 +2100,7 @@ fn unwrap_attested_recipient_envelope_inner(
     let expected_tag = compute_attested_envelope_tag(&mac_key, recipient_pubkey, envelope);
     ct_zeroize(&mut mac_key);
 
-    if ct_eq_16_bytes(&expected_tag, &envelope.auth_tag) != 1 {
+    if ct_eq_fixed(&expected_tag, &envelope.auth_tag) != 1 {
         ct_zeroize(&mut enc_key);
         return Err(AttestedEnvelopeError::AuthenticationFailed);
     }
