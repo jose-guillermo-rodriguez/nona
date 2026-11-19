@@ -2822,10 +2822,141 @@ pub proof fn lemma_bit_to_div_mod(val: u64, shift: u64)
 
 /// Satisfies [FR-06-PSIMALG]
 /// Satisfies [FR-12-FORMALSPEC]
+/// Self-contained Euclidean quotient/remainder uniqueness helper.
+pub proof fn lemma_div_converse(a: int, b: int, q: int, r: int)
+    requires
+        b > 0,
+        0 <= r < b,
+        a == b * q + r,
+    ensures
+        a / b == q,
+        a % b == r,
+{
+    let q2 = a / b;
+    let r2 = a % b;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a, b);
+    assert(b * (q - q2) == r2 - r) by(nonlinear_arith)
+        requires
+            a == b * q + r,
+            a == b * q2 + r2;
+    assert(q - q2 >= 1 ==> b * (q - q2) >= b) by(nonlinear_arith) requires b > 0;
+    assert(q - q2 <= -1 ==> b * (q - q2) <= -b) by(nonlinear_arith) requires b > 0;
+    if q - q2 >= 1 {
+        assert(false);
+    }
+    if q - q2 <= -1 {
+        assert(false);
+    }
+    assert(q == q2);
+    assert(r == r2);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Self-contained nested integer division helper: (x / a) / b == x / (a * b).
+pub proof fn lemma_div_nested(x: int, a: int, b: int)
+    requires
+        x >= 0,
+        a > 0,
+        b > 0,
+    ensures
+        (x / a) / b == x / (a * b),
+{
+    let q1 = x / a;
+    let r1 = x % a;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x, a);
+    let q2 = q1 / b;
+    let r2 = q1 % b;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(q1, b);
+    let r = a * r2 + r1;
+    assert(a * b > 0) by(nonlinear_arith) requires a > 0, b > 0;
+    assert(0 <= r && r < a * b) by(nonlinear_arith)
+        requires
+            a > 0,
+            b > 0,
+            0 <= r1 < a,
+            0 <= r2 < b,
+            r == a * r2 + r1;
+    assert(x == (a * b) * q2 + r) by(nonlinear_arith)
+        requires
+            x == a * q1 + r1,
+            q1 == b * q2 + r2,
+            r == a * r2 + r1;
+    lemma_div_converse(x, a * b, q2, r);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Inductive bit-vector proof relating 64-bit logical right-shift to integer division by 2^k.
+pub proof fn lemma_u64_shr_eq_div_pow2(x: u64, k: u64)
+    requires
+        k < 64,
+    ensures
+        ((x >> k) as nat) == (x as nat) / spec_pow2(k as nat),
+    decreases k,
+{
+    if k == 0 {
+        assert((x >> 0u64) == x) by(bit_vector);
+        reveal(spec_pow2);
+        assert(spec_pow2(0) == 1);
+        assert((x as nat) / 1 == (x as nat));
+    } else {
+        let k1: u64 = (k - 1) as u64;
+        let y: u64 = x >> k1;
+        assert((x >> k) == (y >> 1u64)) by(bit_vector)
+            requires
+                0u64 < k && k < 64u64,
+                k1 + 1u64 == k,
+                y == (x >> k1);
+        assert((y >> 1u64) == (y / 2u64)) by(bit_vector);
+        assert(((y / 2u64) as nat) == (y as nat) / 2);
+        lemma_u64_shr_eq_div_pow2(x, k1);
+        let p_k1 = spec_pow2(k1 as nat);
+        lemma_pow2_pos(k1 as nat);
+        lemma_div_nested(x as int, p_k1 as int, 2);
+        lemma_pow2_step(k as nat);
+        assert(spec_pow2(k as nat) == p_k1 * 2);
+    }
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Machine-checked bit-vector decomposition of a 128-bit integer into high and low 64-bit words.
+pub proof fn lemma_u128_split64(sum: u128)
+    ensures
+        (sum as nat) == ((sum >> 64u128) as nat) * 18446744073709551616_nat + ((#[verifier::truncate] (sum as u64)) as nat),
+{
+    assert(((sum >> 64u128) << 64u128) + (sum & 0xffffffffffffffff_u128) == sum) by(bit_vector);
+    assert((sum & 0xffffffffffffffff_u128) == ((sum as u64) as u128)) by(bit_vector);
+    assert(((sum >> 64u128) << 64u128) == (sum >> 64u128) * 18446744073709551616_u128) by(bit_vector);
+    assert((sum >> 64u128) <= 0xffffffffffffffff_u128) by(bit_vector);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Machine-checked bit-vector decomposition of a bounded signed 128-bit limb difference into low 64-bit word and borrow.
+pub proof fn lemma_i128_diff_split64(diff: i128)
+    requires
+        -18446744073709551616_i128 <= diff && diff <= 18446744073709551615_i128,
+    ensures
+        ({
+            let lo: u64 = #[verifier::truncate] (diff as u64);
+            let b: i128 = if diff < 0i128 { 1i128 } else { 0i128 };
+            (lo as int) - (b as int) * 18446744073709551616_int == (diff as int)
+        }),
+{
+    assert(
+        (-18446744073709551616_i128 <= diff && diff <= 18446744073709551615_i128) ==>
+        ((diff >= 0i128 ==> (((diff as u64) as i128) == diff)) &&
+         (diff < 0i128 ==> (((diff as u64) as i128) == diff + 18446744073709551616_i128)))
+    ) by(bit_vector);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
 /// Multi-limb radix-2^64 projection boundary lemma.
-/// Maps single-limb remainder modulo 2 `(limb >> (j % 64)) % 2`
+/// Machine-checked proof mapping single-limb remainder modulo 2 `(limb >> (j % 64)) % 2`
 /// to the 256-bit mathematical integer bit slice `(fe.to_nat() / spec_pow2(j)) % 2`.
-#[verifier::external_body]
 pub proof fn lemma_multi_limb_bit_to_nat(fe: FieldElement, j: int)
     requires
         0 <= j < 256,
@@ -2837,6 +2968,159 @@ pub proof fn lemma_multi_limb_bit_to_nat(fe: FieldElement, j: int)
             ((limb >> bit_idx) % 2u64) as nat == (fe.to_nat() / spec_pow2(j as nat)) % 2
         }),
 {
+    let limb_idx = (j / 64) as int;
+    let bit_idx = (j % 64) as u64;
+    let limb = fe.limbs[limb_idx];
+    let b_nat = bit_idx as nat;
+
+    lemma_u64_shr_eq_div_pow2(limb, bit_idx);
+    assert(((limb >> bit_idx) % 2u64) as nat == ((limb >> bit_idx) as nat) % 2);
+
+    reveal(FieldElement::to_nat);
+    lemma_pow2_val_64();
+    lemma_pow2_adds(64, 64);
+    lemma_pow2_adds(128, 64);
+
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+
+    let l0 = fe.limbs[0] as nat;
+    let l1 = fe.limbs[1] as nat;
+    let l2 = fe.limbs[2] as nat;
+    let l3 = fe.limbs[3] as nat;
+    assert(l0 < b64 && l1 < b64 && l2 < b64 && l3 < b64);
+
+    assert(spec_pow2(0) == 1) by { reveal(spec_pow2); };
+    assert(spec_pow2(64) == b64);
+    assert(spec_pow2(128) == b128);
+    assert(spec_pow2(192) == b192);
+
+    let base_pow: nat = if limb_idx == 0 {
+        1
+    } else if limb_idx == 1 {
+        b64
+    } else if limb_idx == 2 {
+        b128
+    } else {
+        b192
+    };
+
+    let low_part: nat = if limb_idx == 0 {
+        0
+    } else if limb_idx == 1 {
+        l0
+    } else if limb_idx == 2 {
+        l0 + l1 * b64
+    } else {
+        l0 + l1 * b64 + l2 * b128
+    };
+
+    let high_limbs: nat = if limb_idx == 0 {
+        l1 + l2 * b64 + l3 * b128
+    } else if limb_idx == 1 {
+        l2 + l3 * b64
+    } else if limb_idx == 2 {
+        l3
+    } else {
+        0
+    };
+
+    if limb_idx == 0 {
+        assert(low_part < base_pow);
+        assert(fe.to_nat() == ((limb as nat) + high_limbs * b64) * base_pow + low_part) by(nonlinear_arith)
+            requires
+                fe.to_nat() == l0 + l1 * b64 + l2 * b128 + l3 * b192,
+                (limb as nat) == l0,
+                high_limbs == l1 + l2 * b64 + l3 * b128,
+                base_pow == 1,
+                low_part == 0,
+                b128 == b64 * b64,
+                b192 == b128 * b64;
+    } else if limb_idx == 1 {
+        assert(low_part < base_pow);
+        assert(fe.to_nat() == ((limb as nat) + high_limbs * b64) * base_pow + low_part) by(nonlinear_arith)
+            requires
+                fe.to_nat() == l0 + l1 * b64 + l2 * b128 + l3 * b192,
+                (limb as nat) == l1,
+                high_limbs == l2 + l3 * b64,
+                base_pow == b64,
+                low_part == l0,
+                b128 == b64 * b64,
+                b192 == b128 * b64;
+    } else if limb_idx == 2 {
+        lemma_poly_bound(l0 as int, l1 as int, 0, 0, b64 as int);
+        assert(low_part < base_pow);
+        assert(fe.to_nat() == ((limb as nat) + high_limbs * b64) * base_pow + low_part) by(nonlinear_arith)
+            requires
+                fe.to_nat() == l0 + l1 * b64 + l2 * b128 + l3 * b192,
+                (limb as nat) == l2,
+                high_limbs == l3,
+                base_pow == b128,
+                low_part == l0 + l1 * b64,
+                b128 == b64 * b64,
+                b192 == b128 * b64;
+    } else {
+        lemma_poly_bound(l0 as int, l1 as int, l2 as int, 0, b64 as int);
+        assert(low_part < base_pow);
+        assert(fe.to_nat() == ((limb as nat) + high_limbs * b64) * base_pow + low_part) by(nonlinear_arith)
+            requires
+                fe.to_nat() == l0 + l1 * b64 + l2 * b128 + l3 * b192,
+                (limb as nat) == l3,
+                high_limbs == 0,
+                base_pow == b192,
+                low_part == l0 + l1 * b64 + l2 * b128,
+                b128 == b64 * b64,
+                b192 == b128 * b64;
+    }
+
+    assert(base_pow == spec_pow2((limb_idx * 64) as nat));
+    lemma_pow2_pos((limb_idx * 64) as nat);
+    assert((fe.to_nat() as int) == (base_pow as int) * (((limb as nat) + high_limbs * b64) as int) + (low_part as int)) by(nonlinear_arith)
+        requires fe.to_nat() == ((limb as nat) + high_limbs * b64) * base_pow + low_part;
+    lemma_div_converse(
+        fe.to_nat() as int,
+        base_pow as int,
+        ((limb as nat) + high_limbs * b64) as int,
+        low_part as int,
+    );
+    assert(fe.to_nat() / base_pow == (limb as nat) + high_limbs * b64);
+
+    lemma_pow2_adds((limb_idx * 64) as nat, b_nat);
+    assert((limb_idx * 64) as nat + b_nat == j as nat);
+    let s = spec_pow2(b_nat);
+    lemma_pow2_pos(b_nat);
+    lemma_div_nested(fe.to_nat() as int, base_pow as int, s as int);
+    assert(fe.to_nat() / spec_pow2(j as nat) == ((limb as nat) + high_limbs * b64) / s);
+
+    let rem_bits: nat = (63 - (bit_idx as int)) as nat;
+    lemma_pow2_adds(b_nat, (1 + rem_bits) as nat);
+    lemma_pow2_step((1 + rem_bits) as nat);
+    lemma_pow2_pos(rem_bits);
+    assert(b64 == s * (2 * spec_pow2(rem_bits)));
+
+    let even_k: nat = high_limbs * spec_pow2(rem_bits);
+    assert(high_limbs * b64 == (2 * even_k) * s) by(nonlinear_arith)
+        requires
+            b64 == s * (2 * spec_pow2(rem_bits)),
+            even_k == high_limbs * spec_pow2(rem_bits);
+
+    let q_l = (limb as nat) / s;
+    let r_l = (limb as nat) % s;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod((limb as nat) as int, s as int);
+    assert((limb as nat) + high_limbs * b64 == s * (q_l + 2 * even_k) + r_l) by(nonlinear_arith)
+        requires
+            (limb as nat) == s * q_l + r_l,
+            high_limbs * b64 == (2 * even_k) * s;
+
+    lemma_div_converse(
+        ((limb as nat) + high_limbs * b64) as int,
+        s as int,
+        (q_l + 2 * even_k) as int,
+        r_l as int,
+    );
+    assert(((limb as nat) + high_limbs * b64) / s == q_l + 2 * even_k);
+    vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(even_k as int, q_l as int, 2);
 }
 
 /// Satisfies [FR-06-PSIMALG]
@@ -3327,15 +3611,328 @@ impl ProjectivePoint {
 }
 
 
+// MULTI-LIMB PARTIAL SUM & SOLINAS CONGRUENCE HELPERS
+
+#[verifier::opaque]
+pub open spec fn pow64_k(k: int) -> nat {
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    if k <= 0 { 1 }
+    else if k == 1 { b64 }
+    else if k == 2 { b128 }
+    else if k == 3 { b192 }
+    else { b256 }
+}
+
+#[verifier::opaque]
+pub open spec fn partial_nat_4(limbs: [u64; 4], k: int) -> nat {
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    if k <= 0 {
+        0
+    } else if k == 1 {
+        limbs[0] as nat
+    } else if k == 2 {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64
+    } else if k == 3 {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64 + (limbs[2] as nat) * b128
+    } else {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64 + (limbs[2] as nat) * b128 + (limbs[3] as nat) * b192
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn partial_nat_5(limbs: [u64; 5], k: int) -> nat {
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    if k <= 0 {
+        0
+    } else if k == 1 {
+        limbs[0] as nat
+    } else if k == 2 {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64
+    } else if k == 3 {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64 + (limbs[2] as nat) * b128
+    } else if k == 4 {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64 + (limbs[2] as nat) * b128 + (limbs[3] as nat) * b192
+    } else {
+        (limbs[0] as nat) + (limbs[1] as nat) * b64 + (limbs[2] as nat) * b128 + (limbs[3] as nat) * b192 + (limbs[4] as nat) * b256
+    }
+}
+
+pub open spec fn limbs5_to_nat(r: [u64; 5]) -> nat {
+    partial_nat_5(r, 5)
+}
+
+#[verifier::opaque]
+pub open spec fn pow64_8(k: int) -> nat {
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    let b320: nat = b256 * b64;
+    let b384: nat = b320 * b64;
+    let b448: nat = b384 * b64;
+    let b512: nat = b448 * b64;
+    if k <= 0 { 1 }
+    else if k == 1 { b64 }
+    else if k == 2 { b128 }
+    else if k == 3 { b192 }
+    else if k == 4 { b256 }
+    else if k == 5 { b320 }
+    else if k == 6 { b384 }
+    else if k == 7 { b448 }
+    else { b512 }
+}
+
+#[verifier::opaque]
+pub open spec fn limbs8_to_nat(r: [u64; 8]) -> nat {
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    let b320: nat = b256 * b64;
+    let b384: nat = b320 * b64;
+    let b448: nat = b384 * b64;
+    (r[0] as nat) +
+    (r[1] as nat) * b64 +
+    (r[2] as nat) * b128 +
+    (r[3] as nat) * b192 +
+    (r[4] as nat) * b256 +
+    (r[5] as nat) * b320 +
+    (r[6] as nat) * b384 +
+    (r[7] as nat) * b448
+}
+
+pub proof fn lemma_pow64_k_step(i: int)
+    requires
+        0 <= i < 4,
+    ensures
+        pow64_k(i + 1) == pow64_k(i) * 18446744073709551616_nat,
+{
+    reveal(pow64_k);
+}
+
+pub proof fn lemma_pow64_k_4_eq_pow2_256()
+    ensures
+        pow64_k(4) == spec_pow2(256),
+{
+    reveal(pow64_k);
+    lemma_pow2_val_64();
+    lemma_pow2_adds(64, 64);
+    lemma_pow2_adds(128, 64);
+    lemma_pow2_adds(192, 64);
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    assert(spec_pow2(128) == b128);
+    assert(spec_pow2(192) == b192);
+    assert(spec_pow2(256) == b192 * b64);
+}
+
+pub proof fn lemma_partial_nat_4_base_and_full(limbs: [u64; 4])
+    ensures
+        partial_nat_4(limbs, 0) == 0,
+        partial_nat_4(limbs, 4) == (FieldElement { limbs }).to_nat(),
+{
+    reveal(partial_nat_4);
+    reveal(FieldElement::to_nat);
+}
+
+pub proof fn lemma_partial_nat_4_step(limbs: [u64; 4], i: int)
+    requires
+        0 <= i < 4,
+    ensures
+        partial_nat_4(limbs, i + 1) == partial_nat_4(limbs, i) + (limbs[i] as nat) * pow64_k(i),
+{
+    reveal(partial_nat_4);
+    reveal(pow64_k);
+}
+
+pub proof fn lemma_partial_nat_4_prefix_eq(a: [u64; 4], b: [u64; 4], i: int)
+    requires
+        0 <= i <= 4,
+        forall|k: int| 0 <= k < i ==> a[k] == b[k],
+    ensures
+        partial_nat_4(a, i) == partial_nat_4(b, i),
+{
+    reveal(partial_nat_4);
+}
+
+pub proof fn lemma_partial_nat_5_base_and_full(limbs: [u64; 5])
+    ensures
+        partial_nat_5(limbs, 0) == 0,
+        limbs5_to_nat(limbs) == (limbs[4] as nat) * pow64_k(4) + partial_nat_5(limbs, 4),
+{
+    reveal(partial_nat_5);
+    reveal(pow64_k);
+}
+
+pub proof fn lemma_partial_nat_5_step(limbs: [u64; 5], i: int)
+    requires
+        0 <= i < 4,
+    ensures
+        partial_nat_5(limbs, i + 1) == partial_nat_5(limbs, i) + (limbs[i] as nat) * pow64_k(i),
+{
+    reveal(partial_nat_5);
+    reveal(pow64_k);
+}
+
+pub proof fn lemma_partial_nat_5_prefix_eq(a: [u64; 5], b: [u64; 5], i: int)
+    requires
+        0 <= i <= 4,
+        forall|k: int| 0 <= k < i ==> a[k] == b[k],
+    ensures
+        partial_nat_5(a, i) == partial_nat_5(b, i),
+{
+    reveal(partial_nat_5);
+}
+
+pub proof fn lemma_pow64_8_props(i: int, j: int)
+    requires
+        0 <= i < 4,
+        0 <= j < 4,
+    ensures
+        pow64_8(i + j + 1) == pow64_8(i + j) * 18446744073709551616_nat,
+        pow64_8(i + j) == pow64_8(i) * pow64_k(j),
+        pow64_8(i) == pow64_k(i),
+{
+    reveal(pow64_8);
+    reveal(pow64_k);
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    let b320: nat = b256 * b64;
+    let b384: nat = b320 * b64;
+    assert(b128 * b128 == b256) by(nonlinear_arith)
+        requires b128 == b64 * b64, b192 == b128 * b64, b256 == b192 * b64;
+    assert(b128 * b192 == b320) by(nonlinear_arith)
+        requires b128 == b64 * b64, b192 == b128 * b64, b256 == b192 * b64, b320 == b256 * b64;
+    assert(b192 * b128 == b320) by(nonlinear_arith)
+        requires b128 * b192 == b320;
+    assert(b192 * b192 == b384) by(nonlinear_arith)
+        requires b128 == b64 * b64, b192 == b128 * b64, b256 == b192 * b64, b320 == b256 * b64, b384 == b320 * b64;
+}
+
+pub proof fn lemma_limbs8_zero_and_update(r_prev: [u64; 8], r_next: [u64; 8], idx: int)
+    requires
+        0 <= idx < 8,
+        forall|k: int| 0 <= k < 8 && k != idx ==> r_next[k] == r_prev[k],
+    ensures
+        (limbs8_to_nat(r_next) as int) - (limbs8_to_nat(r_prev) as int)
+            == ((r_next[idx] as int) - (r_prev[idx] as int)) * (pow64_8(idx) as int),
+{
+    reveal(limbs8_to_nat);
+    reveal(pow64_8);
+    if idx == 0 {
+        assert(r_next[1] == r_prev[1] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 1 {
+        assert(r_next[0] == r_prev[0] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 2 {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 3 {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[2] == r_prev[2]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 4 {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[5] == r_prev[5] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 5 {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[6] == r_prev[6] && r_next[7] == r_prev[7]);
+    } else if idx == 6 {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[7] == r_prev[7]);
+    } else {
+        assert(r_next[0] == r_prev[0] && r_next[1] == r_prev[1] && r_next[2] == r_prev[2] && r_next[3] == r_prev[3]
+            && r_next[4] == r_prev[4] && r_next[5] == r_prev[5] && r_next[6] == r_prev[6]);
+    }
+    let x = r_next[idx] as int;
+    let y = r_prev[idx] as int;
+    let w = pow64_8(idx) as int;
+    assert((limbs8_to_nat(r_next) as int) - (limbs8_to_nat(r_prev) as int) == x * w - y * w);
+    assert(x * w - y * w == (x - y) * w) by(nonlinear_arith);
+}
+
+pub proof fn lemma_limbs8_zero_init(r: [u64; 8])
+    requires
+        forall|k: int| 0 <= k < 8 ==> r[k] == 0,
+    ensures
+        limbs8_to_nat(r) == 0,
+{
+    reveal(limbs8_to_nat);
+}
+
+pub proof fn lemma_limbs8_split_256(r: [u64; 8])
+    ensures
+        limbs8_to_nat(r)
+            == (FieldElement { limbs: [r[4], r[5], r[6], r[7]] }).to_nat() * spec_pow2(256)
+             + (FieldElement { limbs: [r[0], r[1], r[2], r[3]] }).to_nat(),
+{
+    reveal(limbs8_to_nat);
+    reveal(FieldElement::to_nat);
+    lemma_pow64_k_4_eq_pow2_256();
+    reveal(pow64_k);
+    let b64: nat = 18446744073709551616_nat;
+    let b128: nat = b64 * b64;
+    let b192: nat = b128 * b64;
+    let b256: nat = b192 * b64;
+    let b320: nat = b256 * b64;
+    let b384: nat = b320 * b64;
+    let b448: nat = b384 * b64;
+    let x4 = r[4] as nat;
+    let x5 = r[5] as nat;
+    let x6 = r[6] as nat;
+    let x7 = r[7] as nat;
+    assert((x4 + x5 * b64 + x6 * b128 + x7 * b192) * b256
+        == x4 * b256 + x5 * b320 + x6 * b384 + x7 * b448) by(nonlinear_arith)
+        requires
+            b128 == b64 * b64,
+            b192 == b128 * b64,
+            b256 == b192 * b64,
+            b320 == b256 * b64,
+            b384 == b320 * b64,
+            b448 == b384 * b64;
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Secp256k1 Solinas prime reduction step: 2^256 == p + (2^32 + 977) ==> x * 2^256 + y === x * (2^32 + 977) + y (mod p).
+pub proof fn lemma_solinas_reduce_step(x: nat, y: nat)
+    ensures
+        ((x * spec_pow2(256) + y) as int) % (spec_p() as int)
+            == ((x * 4294968273_nat + y) as int) % (spec_p() as int),
+{
+    lemma_p_bounds();
+    lemma_pow64_k_4_eq_pow2_256();
+    reveal(pow64_k);
+    let p = spec_p() as int;
+    let xi = x as int;
+    let yi = y as int;
+    let c: int = 4294968273;
+    assert((spec_pow2(256) as int) == p + c);
+    assert(xi * (spec_pow2(256) as int) + yi == (xi * c + yi) + xi * p) by(nonlinear_arith)
+        requires (spec_pow2(256) as int) == p + c;
+    vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(xi, xi * c + yi, p);
+}
+
+
 // EXECUTIVE IMPLEMENTATION (With Hoare-Logic Verification Contracts)
 
 
 /// Satisfies [FR-06-PSIMALG]
 /// Satisfies [FR-12-FORMALSPEC]
 /// Multi-precision addition of two 256-bit integers without modular reduction.
-/// Returns the final carry bit and the resulting limbs.
+/// Machine-checked loop invariant proves exact radix-2^64 carry propagation.
 #[inline(always)]
-#[verifier::external_body]
 fn add_nocarry(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
     ensures
         res.0 == 0 || res.0 == 1,
@@ -3344,20 +3941,59 @@ fn add_nocarry(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
     let mut res = [0u64; 4];
     let mut carry = 0u128;
     let mut i = 0;
+    proof {
+        reveal(pow64_k);
+        lemma_partial_nat_4_base_and_full(res);
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
+    }
     while i < 4
         invariant
             0 <= i <= 4,
             carry == 0 || carry == 1,
+            (carry as nat) * pow64_k(i as int) + partial_nat_4(res, i as int)
+                == partial_nat_4(*a, i as int) + partial_nat_4(*b, i as int),
         decreases 4 - i
     {
         let prev_carry = carry;
+        let ghost prev_res = res;
         let sum = (a[i] as u128) + (b[i] as u128) + carry;
         res[i] = #[verifier::truncate] (sum as u64);
         carry = sum >> 64;
         proof {
             lemma_u128_shr64_bound(sum);
+            lemma_u128_split64(sum);
+            lemma_pow64_k_step(i as int);
+            lemma_partial_nat_4_prefix_eq(prev_res, res, i as int);
+            lemma_partial_nat_4_step(res, i as int);
+            lemma_partial_nat_4_step(*a, i as int);
+            lemma_partial_nat_4_step(*b, i as int);
+
+            let b64: nat = 18446744073709551616_nat;
+            let pk = pow64_k(i as int);
+            let pk1 = pow64_k((i + 1) as int);
+            let p_res = partial_nat_4(prev_res, i as int);
+            let p_a = partial_nat_4(*a, i as int);
+            let p_b = partial_nat_4(*b, i as int);
+            let ai = a[i as int] as nat;
+            let bi = b[i as int] as nat;
+            let ri = res[i as int] as nat;
+            let c0 = prev_carry as nat;
+            let c1 = carry as nat;
+
+            assert(c1 * pk1 + (p_res + ri * pk) == (p_a + ai * pk) + (p_b + bi * pk)) by(nonlinear_arith)
+                requires
+                    c0 * pk + p_res == p_a + p_b,
+                    ai + bi + c0 == c1 * b64 + ri,
+                    pk1 == pk * b64;
         }
         i += 1;
+    }
+    proof {
+        lemma_pow64_k_4_eq_pow2_256();
+        lemma_partial_nat_4_base_and_full(res);
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
     }
     (#[verifier::truncate] (carry as u64), res)
 }
@@ -3365,9 +4001,8 @@ fn add_nocarry(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
 /// Satisfies [FR-06-PSIMALG]
 /// Satisfies [FR-12-FORMALSPEC]
 /// Multi-precision subtraction of two 256-bit integers without modular reduction.
-/// Returns the final borrow bit and the resulting limbs.
+/// Machine-checked loop invariant proves exact radix-2^64 borrow propagation.
 #[inline(always)]
-#[verifier::external_body]
 fn sub_noborrow(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
     ensures
         res.0 == 0 || res.0 == 1,
@@ -3377,18 +4012,83 @@ fn sub_noborrow(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
     let mut res = [0u64; 4];
     let mut borrow = 0i128;
     let mut i = 0;
+    proof {
+        reveal(pow64_k);
+        lemma_partial_nat_4_base_and_full(res);
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
+    }
     while i < 4
         invariant
             0 <= i <= 4,
             borrow == 0 || borrow == 1,
+            (partial_nat_4(res, i as int) as int) - (borrow as int) * (pow64_k(i as int) as int)
+                == (partial_nat_4(*a, i as int) as int) - (partial_nat_4(*b, i as int) as int),
         decreases 4 - i
     {
+        let prev_borrow = borrow;
+        let ghost prev_res = res;
         let ai = a[i] as i128;
         let bi = b[i] as i128;
         let diff = ai - bi - borrow;
         res[i] = #[verifier::truncate] (diff as u64);
         borrow = if diff < 0 { 1 } else { 0 };
+        proof {
+            lemma_i128_diff_split64(diff);
+            lemma_pow64_k_step(i as int);
+            lemma_partial_nat_4_prefix_eq(prev_res, res, i as int);
+            lemma_partial_nat_4_step(res, i as int);
+            lemma_partial_nat_4_step(*a, i as int);
+            lemma_partial_nat_4_step(*b, i as int);
+
+            let b64: int = 18446744073709551616_int;
+            let pk = pow64_k(i as int) as int;
+            let pk1 = pow64_k((i + 1) as int) as int;
+            let p_res = partial_nat_4(prev_res, i as int) as int;
+            let p_a = partial_nat_4(*a, i as int) as int;
+            let p_b = partial_nat_4(*b, i as int) as int;
+            let a_i = a[i as int] as int;
+            let b_i = b[i as int] as int;
+            let r_i = res[i as int] as int;
+            let br0 = prev_borrow as int;
+            let br1 = borrow as int;
+
+            assert((p_res + r_i * pk) - br1 * pk1 == (p_a + a_i * pk) - (p_b + b_i * pk)) by(nonlinear_arith)
+                requires
+                    p_res - br0 * pk == p_a - p_b,
+                    r_i - br1 * b64 == a_i - b_i - br0,
+                    pk1 == pk * b64;
+        }
         i += 1;
+    }
+    proof {
+        lemma_pow64_k_4_eq_pow2_256();
+        lemma_partial_nat_4_base_and_full(res);
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
+        let res_fe = FieldElement { limbs: res };
+        let a_fe = FieldElement { limbs: *a };
+        let b_fe = FieldElement { limbs: *b };
+        lemma_fe_to_nat_bounds(res_fe);
+        let p256 = spec_pow2(256) as int;
+        let rn = res_fe.to_nat() as int;
+        let an = a_fe.to_nat() as int;
+        let bn = b_fe.to_nat() as int;
+        if an >= bn {
+            if borrow == 1 {
+                assert(rn - p256 == an - bn);
+                assert(false);
+            }
+            assert(borrow == 0);
+            assert(rn == an - bn);
+        } else {
+            if borrow == 0 {
+                assert(rn == an - bn);
+                assert(false);
+            }
+            assert(borrow == 1);
+            assert(rn == an + p256 - bn);
+        }
     }
     (#[verifier::truncate] (borrow as u64), res)
 }
@@ -3397,24 +4097,44 @@ fn sub_noborrow(a: &[u64; 4], b: &[u64; 4]) -> (res: (u64, [u64; 4]))
 /// Satisfies [FR-12-FORMALSPEC]
 /// Multi-precision schoolbook multiplication of two 256-bit integers to a 512-bit integer.
 #[inline(always)]
-fn mul_512(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
+fn mul_512(a: &[u64; 4], b: &[u64; 4]) -> (res: [u64; 8])
+    ensures
+        limbs8_to_nat(res) == (FieldElement { limbs: *a }).to_nat() * (FieldElement { limbs: *b }).to_nat(),
+{
     let mut r = [0u64; 8];
     let mut i: usize = 0;
+    proof {
+        lemma_limbs8_zero_init(r);
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
+    }
     while i < 4
         invariant
             0 <= i <= 4,
+            limbs8_to_nat(r) == partial_nat_4(*a, i as int) * partial_nat_4(*b, 4),
+            forall|k: int| (i as int + 4) <= k < 8 ==> r[k] == 0,
         decreases 4 - i
     {
+        let ghost r_before_i = r;
         let mut carry = 0u64;
         let mut j: usize = 0;
+        proof {
+            reveal(pow64_8);
+            lemma_partial_nat_4_base_and_full(*b);
+        }
         while j < 4
             invariant
                 i < 4,
                 0 <= j <= 4,
                 (i as int + j as int) < 8,
                 carry <= 0xffffffffffffffff_u64,
+                forall|k: int| (i as int + 4) <= k < 8 ==> r[k] == 0,
+                (carry as nat) * pow64_8((i + j) as int) + limbs8_to_nat(r)
+                    == limbs8_to_nat(r_before_i) + (a[i as int] as nat) * pow64_8(i as int) * partial_nat_4(*b, j as int),
             decreases 4 - j
         {
+            let ghost r_prev = r;
+            let prev_carry = carry;
             proof {
                 let ai_int = a[i as int] as int; let bj_int = b[j as int] as int; let rij_int = r[(i + j) as int] as int; let c_int = carry as int;
                 assert(0 <= ai_int && ai_int <= 0xffffffffffffffff_int && 0 <= bj_int && bj_int <= 0xffffffffffffffff_int && 0 <= rij_int && rij_int <= 0xffffffffffffffff_int && 0 <= c_int && c_int <= 0xffffffffffffffff_int ==> ai_int * bj_int + rij_int + c_int <= 0xffffffffffffffffffffffffffffffff_int) by(nonlinear_arith);
@@ -3423,10 +4143,68 @@ fn mul_512(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
             let val = (a[i] as u128) * (b[j] as u128) + (r[i + j] as u128) + (carry as u128);
             r[i + j] = #[verifier::truncate] (val as u64);
             carry = #[verifier::truncate] ((val >> 64) as u64);
+            proof {
+                lemma_u128_split64(val);
+                let idx = (i + j) as int;
+                lemma_pow64_8_props(i as int, j as int);
+                lemma_limbs8_zero_and_update(r_prev, r, idx);
+                lemma_partial_nat_4_step(*b, j as int);
+
+                let b64: nat = 18446744073709551616_nat;
+                let p_idx = pow64_8(idx);
+                let p_idx1 = pow64_8(idx + 1);
+                let p_i = pow64_8(i as int);
+                let p_j = pow64_k(j as int);
+                let l_prev = limbs8_to_nat(r_prev);
+                let l_next = limbs8_to_nat(r);
+                let l_base = limbs8_to_nat(r_before_i);
+                let pb_j = partial_nat_4(*b, j as int);
+                let ai = a[i as int] as nat;
+                let bj = b[j as int] as nat;
+                let r_old = r_prev[idx] as nat;
+                let r_new = r[idx] as nat;
+                let c0 = prev_carry as nat;
+                let c1 = carry as nat;
+
+                assert(c1 * p_idx1 + l_next == l_base + ai * p_i * (pb_j + bj * p_j)) by(nonlinear_arith)
+                    requires
+                        c0 * p_idx + l_prev == l_base + ai * p_i * pb_j,
+                        ai * bj + r_old + c0 == c1 * b64 + r_new,
+                        (l_next as int) - (l_prev as int) == ((r_new as int) - (r_old as int)) * (p_idx as int),
+                        p_idx1 == p_idx * b64,
+                        p_idx == p_i * p_j;
+            }
             j += 1;
         }
+        let ghost r_mid = r;
         r[i + 4] = carry;
+        proof {
+            let idx4 = (i + 4) as int;
+            lemma_limbs8_zero_and_update(r_mid, r, idx4);
+            lemma_pow64_8_props(i as int, 0);
+            lemma_partial_nat_4_step(*a, i as int);
+
+            let p_i4 = pow64_8(idx4);
+            let p_i = pow64_8(i as int);
+            let l_mid = limbs8_to_nat(r_mid);
+            let l_next = limbs8_to_nat(r);
+            let l_base = limbs8_to_nat(r_before_i);
+            let pa_i = partial_nat_4(*a, i as int);
+            let pb_4 = partial_nat_4(*b, 4);
+            let ai = a[i as int] as nat;
+            let c_end = carry as nat;
+
+            assert(l_next == (pa_i + ai * p_i) * pb_4) by(nonlinear_arith)
+                requires
+                    c_end * p_i4 + l_mid == l_base + ai * p_i * pb_4,
+                    (l_next as int) - (l_mid as int) == (c_end as int) * (p_i4 as int),
+                    l_base == pa_i * pb_4;
+        }
         i += 1;
+    }
+    proof {
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_4_base_and_full(*b);
     }
     r
 }
@@ -3435,16 +4213,28 @@ fn mul_512(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
 /// Satisfies [FR-12-FORMALSPEC]
 /// Multiplies a 256-bit integer by a 64-bit scalar value.
 #[inline(always)]
-fn mul_256_by_64(a: &[u64; 4], c: u64) -> [u64; 5] {
+fn mul_256_by_64(a: &[u64; 4], c: u64) -> (res: [u64; 5])
+    ensures
+        limbs5_to_nat(res) == (FieldElement { limbs: *a }).to_nat() * (c as nat),
+{
     let mut res = [0u64; 5];
     let mut carry = 0u128;
     let mut i = 0;
+    proof {
+        reveal(pow64_k);
+        lemma_partial_nat_5_base_and_full(res);
+        lemma_partial_nat_4_base_and_full(*a);
+    }
     while i < 4
         invariant
             0 <= i <= 4,
             carry <= 0xffffffffffffffff_u128,
+            (carry as nat) * pow64_k(i as int) + partial_nat_5(res, i as int)
+                == partial_nat_4(*a, i as int) * (c as nat),
         decreases 4 - i
     {
+        let prev_carry = carry;
+        let ghost prev_res = res;
         proof {
             let ai_int = a[i as int] as int; let cv_int = c as int; let cry_int = carry as int;
             assert(0 <= ai_int && ai_int <= 0xffffffffffffffff_int && 0 <= cv_int && cv_int <= 0xffffffffffffffff_int && 0 <= cry_int && cry_int <= 0xffffffffffffffff_int ==> ai_int * cv_int + cry_int <= 0xffffffffffffffffffffffffffffffff_int) by(nonlinear_arith);
@@ -3455,10 +4245,38 @@ fn mul_256_by_64(a: &[u64; 4], c: u64) -> [u64; 5] {
         carry = val >> 64;
         proof {
             assert((val >> 64) <= 0xffffffffffffffff_u128) by(bit_vector);
+            lemma_u128_split64(val);
+            lemma_pow64_k_step(i as int);
+            lemma_partial_nat_5_prefix_eq(prev_res, res, i as int);
+            lemma_partial_nat_5_step(res, i as int);
+            lemma_partial_nat_4_step(*a, i as int);
+
+            let b64: nat = 18446744073709551616_nat;
+            let pk = pow64_k(i as int);
+            let pk1 = pow64_k((i + 1) as int);
+            let p_res = partial_nat_5(prev_res, i as int);
+            let p_a = partial_nat_4(*a, i as int);
+            let ai = a[i as int] as nat;
+            let cn = c as nat;
+            let ri = res[i as int] as nat;
+            let c0 = prev_carry as nat;
+            let c1 = carry as nat;
+
+            assert(c1 * pk1 + (p_res + ri * pk) == (p_a + ai * pk) * cn) by(nonlinear_arith)
+                requires
+                    c0 * pk + p_res == p_a * cn,
+                    ai * cn + c0 == c1 * b64 + ri,
+                    pk1 == pk * b64;
         }
         i += 1;
     }
+    let ghost prev_res_4 = res;
     res[4] = #[verifier::truncate] (carry as u64);
+    proof {
+        lemma_partial_nat_4_base_and_full(*a);
+        lemma_partial_nat_5_prefix_eq(prev_res_4, res, 4);
+        lemma_partial_nat_5_base_and_full(res);
+    }
     res
 }
 
@@ -3466,7 +4284,13 @@ fn mul_256_by_64(a: &[u64; 4], c: u64) -> [u64; 5] {
 /// Satisfies [FR-12-FORMALSPEC]
 /// Performs multi-pass conditional subtraction reduction ladder to guarantee canonical result strictly < P.
 #[inline(always)]
-fn reduce_final(sum: [u64; 4]) -> (res: [u64; 4]) {
+fn reduce_final(sum: [u64; 4]) -> (res: [u64; 4])
+    requires
+        (FieldElement { limbs: sum }).to_nat() < 2 * spec_p(),
+    ensures
+        (FieldElement { limbs: res }).is_valid(),
+        (FieldElement { limbs: res }).to_nat() == ((FieldElement { limbs: sum }).to_nat() % spec_p()),
+{
     #[cfg(any(
         any(verus, feature = "verus"),
         not(any(
@@ -3482,6 +4306,10 @@ fn reduce_final(sum: [u64; 4]) -> (res: [u64; 4]) {
         while i < 4
             invariant
                 0 <= i <= 4,
+                i >= 1 ==> step1[0] == ((diff1[0] & mask1) | (sum[0] & !mask1)),
+                i >= 2 ==> step1[1] == ((diff1[1] & mask1) | (sum[1] & !mask1)),
+                i >= 3 ==> step1[2] == ((diff1[2] & mask1) | (sum[2] & !mask1)),
+                i >= 4 ==> step1[3] == ((diff1[3] & mask1) | (sum[3] & !mask1)),
             decreases 4 - i
         {
             step1[i] = (diff1[i] & mask1) | (sum[i] & !mask1);
@@ -3495,10 +4323,56 @@ fn reduce_final(sum: [u64; 4]) -> (res: [u64; 4]) {
         while j < 4
             invariant
                 0 <= j <= 4,
+                j >= 1 ==> res[0] == ((diff2[0] & mask2) | (step1[0] & !mask2)),
+                j >= 2 ==> res[1] == ((diff2[1] & mask2) | (step1[1] & !mask2)),
+                j >= 3 ==> res[2] == ((diff2[2] & mask2) | (step1[2] & !mask2)),
+                j >= 4 ==> res[3] == ((diff2[3] & mask2) | (step1[3] & !mask2)),
             decreases 4 - j
         {
             res[j] = (diff2[j] & mask2) | (step1[j] & !mask2);
             j += 1;
+        }
+        proof {
+            lemma_p_bounds();
+            lemma_p_to_nat();
+            let sum_fe = FieldElement { limbs: sum };
+            let diff1_fe = FieldElement { limbs: diff1 };
+            let step1_fe = FieldElement { limbs: step1 };
+            let diff2_fe = FieldElement { limbs: diff2 };
+            let res_fe = FieldElement { limbs: res };
+            let p_nat = spec_p();
+
+            lemma_sub_condition_mask(borrow1);
+            lemma_select_u64(diff1[0], sum[0], mask1);
+            lemma_select_u64(diff1[1], sum[1], mask1);
+            lemma_select_u64(diff1[2], sum[2], mask1);
+            lemma_select_u64(diff1[3], sum[3], mask1);
+
+            if borrow1 == 0 {
+                assert(step1 == diff1);
+                assert(sum_fe.to_nat() >= p_nat);
+                assert(step1_fe.to_nat() == sum_fe.to_nat() - p_nat);
+                assert(step1_fe.to_nat() < p_nat);
+                lemma_mod_add_sub_p(sum_fe.to_nat() as int, p_nat as int);
+                assert(step1_fe.to_nat() == sum_fe.to_nat() % p_nat);
+            } else {
+                assert(step1 == sum);
+                assert(sum_fe.to_nat() < p_nat);
+                assert(step1_fe.to_nat() == sum_fe.to_nat());
+                lemma_small_mod(sum_fe.to_nat() as int, p_nat as int);
+                assert(step1_fe.to_nat() == sum_fe.to_nat() % p_nat);
+            }
+
+            assert(step1_fe.to_nat() < p_nat);
+            assert(borrow2 == 1);
+            lemma_sub_condition_mask(borrow2);
+            lemma_select_u64(diff2[0], step1[0], mask2);
+            lemma_select_u64(diff2[1], step1[1], mask2);
+            lemma_select_u64(diff2[2], step1[2], mask2);
+            lemma_select_u64(diff2[3], step1[3], mask2);
+            assert(res == step1);
+            assert(res_fe.is_valid());
+            assert(res_fe.to_nat() == sum_fe.to_nat() % p_nat);
         }
         res
     }
@@ -3803,18 +4677,11 @@ impl FieldElement {
         out
     }
 
-        /// Satisfies [FR-06-PSIMALG]
+    /// Satisfies [FR-06-PSIMALG]
     /// Satisfies [FR-12-FORMALSPEC]
     /// Modular multiplication: self * other (mod p), constant-time.
-    ///
-    /// # Trusted Computing Base (TCB) Boundary
-    /// Axiomatic primitive boundary: Non-linear degree-2 multi-limb multiplication
-    /// and Solinas reduction modulo p = 2^256 - 2^32 - 977 are formally axiomatized
-    /// under #[verifier::external_body]. Dead internal proof annotations, unverified loop
-    /// invariants, and ghost assertions were stripped from the axiomatic boundary to
-    /// eliminate misleading verification claims and maintain an honest SMT trust surface.
-    /// Tracked formally in docs/TCB.md §3.
-    #[verifier::external_body]
+    /// Machine-checked proof discharges 256x256->512 schoolbook multiplication and
+    /// multi-pass Solinas prime reduction modulo p = 2^256 - 2^32 - 977 without axioms.
     pub fn mul(&self, other: &Self) -> (res: Self)
         requires
             self.is_valid(),
@@ -3833,27 +4700,209 @@ impl FieldElement {
         let mut w = [0u64; 5];
         let mut carry = 0u128;
         let mut i = 0;
-        while i < 4 {
+        proof {
+            reveal(pow64_k);
+            lemma_partial_nat_4_base_and_full([w[0], w[1], w[2], w[3]]);
+            lemma_partial_nat_4_base_and_full(t_l);
+            lemma_partial_nat_5_base_and_full(v);
+        }
+        while i < 4
+            invariant
+                0 <= i <= 4,
+                carry == 0 || carry == 1,
+                (carry as nat) * pow64_k(i as int) + partial_nat_4([w[0], w[1], w[2], w[3]], i as int)
+                    == partial_nat_4(t_l, i as int) + partial_nat_5(v, i as int),
+            decreases 4 - i
+        {
+            let prev_carry = carry;
+            let ghost prev_w = w;
             let val = (t_l[i] as u128) + (v[i] as u128) + carry;
-            w[i] = val as u64;
+            w[i] = #[verifier::truncate] (val as u64);
             carry = val >> 64;
+            proof {
+                lemma_u128_shr64_bound(val);
+                lemma_u128_split64(val);
+                lemma_pow64_k_step(i as int);
+                let w4_prev = [prev_w[0], prev_w[1], prev_w[2], prev_w[3]];
+                let w4_curr = [w[0], w[1], w[2], w[3]];
+                lemma_partial_nat_4_prefix_eq(w4_prev, w4_curr, i as int);
+                lemma_partial_nat_4_step(w4_curr, i as int);
+                lemma_partial_nat_4_step(t_l, i as int);
+                lemma_partial_nat_5_step(v, i as int);
+
+                let b64: nat = 18446744073709551616_nat;
+                let pk = pow64_k(i as int);
+                let pk1 = pow64_k((i + 1) as int);
+                let pw = partial_nat_4(w4_prev, i as int);
+                let ptl = partial_nat_4(t_l, i as int);
+                let pv = partial_nat_5(v, i as int);
+                let tli = t_l[i as int] as nat;
+                let vi = v[i as int] as nat;
+                let wi = w[i as int] as nat;
+                let c0 = prev_carry as nat;
+                let c1 = carry as nat;
+
+                assert(c1 * pk1 + (pw + wi * pk) == (ptl + tli * pk) + (pv + vi * pk)) by(nonlinear_arith)
+                    requires
+                        c0 * pk + pw == ptl + pv,
+                        tli + vi + c0 == c1 * b64 + wi,
+                        pk1 == pk * b64;
+            }
             i += 1;
         }
+        proof {
+            let th_fe = FieldElement { limbs: t_h };
+            lemma_fe_to_nat_bounds(th_fe);
+            lemma_pow64_k_4_eq_pow2_256();
+            lemma_partial_nat_5_base_and_full(v);
+            let th_n = th_fe.to_nat();
+            let p256 = spec_pow2(256);
+            let v4 = v[4] as nat;
+            let pv4 = partial_nat_5(v, 4);
+            let c_sol: nat = 4294968273_nat;
+            assert(v4 * p256 + pv4 == th_n * c_sol);
+            assert(v4 * p256 + pv4 < c_sol * p256) by(nonlinear_arith)
+                requires
+                    v4 * p256 + pv4 == th_n * c_sol,
+                    th_n < p256,
+                    c_sol > 0;
+            assert(v4 < c_sol) by(nonlinear_arith)
+                requires
+                    v4 * p256 + pv4 < c_sol * p256,
+                    p256 > 0;
+            assert(v[4] <= 4294968272_u64);
+        }
         let val_4 = (v[4] as u128) + carry;
-        w[4] = val_4 as u64;
+        w[4] = #[verifier::truncate] (val_4 as u64);
 
         let z_val = (w[4] as u128) * 4_294_968_273_u128;
-        let z = [z_val as u64, (z_val >> 64) as u64, 0u64, 0u64];
+        let z = [#[verifier::truncate] (z_val as u64), #[verifier::truncate] ((z_val >> 64) as u64), 0u64, 0u64];
 
         let (carry2, s2) = add_nocarry(&[w[0], w[1], w[2], w[3]], &z);
 
         let offset = (carry2 as u128) * 4_294_968_273_u128;
-        let offset_limbs = [offset as u64, (offset >> 64) as u64, 0, 0];
+        let offset_limbs = [#[verifier::truncate] (offset as u64), #[verifier::truncate] ((offset >> 64) as u64), 0, 0];
         let (carry3, s3) = add_nocarry(&s2, &offset_limbs);
 
         let offset2 = (carry3 as u128) * 4_294_968_273_u128;
-        let offset2_limbs = [offset2 as u64, (offset2 >> 64) as u64, 0, 0];
+        let offset2_limbs = [#[verifier::truncate] (offset2 as u64), #[verifier::truncate] ((offset2 >> 64) as u64), 0, 0];
         let (_carry4, s4) = add_nocarry(&s3, &offset2_limbs);
+
+        proof {
+            lemma_p_bounds();
+            lemma_pow64_k_4_eq_pow2_256();
+            lemma_limbs8_split_256(r);
+            lemma_partial_nat_4_base_and_full([w[0], w[1], w[2], w[3]]);
+            lemma_partial_nat_4_base_and_full(t_l);
+            lemma_partial_nat_5_base_and_full(v);
+            lemma_partial_nat_5_base_and_full(w);
+            lemma_u128_split64(z_val);
+            lemma_u128_split64(offset);
+            lemma_u128_split64(offset2);
+
+            let p = spec_p() as int;
+            let p256 = spec_pow2(256);
+            let b64: nat = 18446744073709551616_nat;
+            let c_sol: nat = 4294968273_nat;
+
+            let tl_fe = FieldElement { limbs: t_l };
+            let th_fe = FieldElement { limbs: t_h };
+            let w_low_fe = FieldElement { limbs: [w[0], w[1], w[2], w[3]] };
+            let z_fe = FieldElement { limbs: z };
+            let s2_fe = FieldElement { limbs: s2 };
+            let off_fe = FieldElement { limbs: offset_limbs };
+            let s3_fe = FieldElement { limbs: s3 };
+            let off2_fe = FieldElement { limbs: offset2_limbs };
+            let s4_fe = FieldElement { limbs: s4 };
+
+            lemma_fe_to_nat_bounds(s2_fe);
+            lemma_fe_to_nat_bounds(s3_fe);
+            lemma_fe_to_nat_bounds(s4_fe);
+
+            // Step 1: self * other == th * 2^256 + tl === th * C + tl (mod p)
+            assert(self.to_nat() * other.to_nat() == th_fe.to_nat() * p256 + tl_fe.to_nat());
+            lemma_solinas_reduce_step(th_fe.to_nat(), tl_fe.to_nat());
+
+            // Step 2: (w[4] * 2^256 + w_low) == th * C + tl === w[4] * C + w_low (mod p)
+            let w4 = w[4] as nat;
+            let v4 = v[4] as nat;
+            let c_end = carry as nat;
+            let w_low_n = w_low_fe.to_nat();
+            let tl_n = tl_fe.to_nat();
+            let pv4 = partial_nat_5(v, 4);
+            let th_c = th_fe.to_nat() * c_sol;
+            assert(c_end * p256 + w_low_n == tl_n + pv4);
+            assert(v4 * p256 + pv4 == th_c);
+            assert(w4 == v4 + c_end);
+            assert(w4 * p256 + w_low_n == tl_n + th_c) by(nonlinear_arith)
+                requires
+                    c_end * p256 + w_low_n == tl_n + pv4,
+                    v4 * p256 + pv4 == th_c,
+                    w4 == v4 + c_end;
+            lemma_solinas_reduce_step(w4, w_low_n);
+
+            // Step 3: carry2 * 2^256 + s2 == w_low + w[4] * C === carry2 * C + s2 (mod p)
+            reveal(FieldElement::to_nat);
+            assert(((z_val >> 64u128) as nat) <= 0xffffffffffffffff_nat) by(nonlinear_arith)
+                requires
+                    (z_val as nat) == w4 * c_sol,
+                    w4 <= 4294968273_nat,
+                    c_sol == 4294968273_nat,
+                    (z_val as nat) == ((z_val >> 64u128) as nat) * 18446744073709551616_nat + ((#[verifier::truncate] (z_val as u64)) as nat);
+            assert((z[1] as nat) == ((z_val >> 64u128) as nat));
+            assert((z[2] as nat) == 0 && (z[3] as nat) == 0);
+            let b128: nat = b64 * b64;
+            let b192: nat = b128 * b64;
+            assert((z[2] as nat) * b128 == 0 && (z[3] as nat) * b192 == 0) by(nonlinear_arith)
+                requires (z[2] as nat) == 0, (z[3] as nat) == 0;
+            assert(z_fe.to_nat() == (z[0] as nat) + (z[1] as nat) * b64);
+            assert(z_fe.to_nat() == w4 * c_sol);
+            assert((carry2 as nat) * p256 + s2_fe.to_nat() == w4 * c_sol + w_low_n);
+            lemma_solinas_reduce_step(carry2 as nat, s2_fe.to_nat());
+
+            // Step 4: carry3 * 2^256 + s3 == s2 + carry2 * C === carry3 * C + s3 (mod p)
+            assert(((offset >> 64u128) as nat) == 0) by(nonlinear_arith)
+                requires
+                    (offset as nat) == (carry2 as nat) * c_sol,
+                    (carry2 as nat) <= 1,
+                    c_sol == 4294968273_nat,
+                    (offset as nat) == ((offset >> 64u128) as nat) * 18446744073709551616_nat + ((#[verifier::truncate] (offset as u64)) as nat);
+            assert((offset_limbs[1] as nat) == 0);
+            assert(off_fe.to_nat() == (offset_limbs[0] as nat) + (offset_limbs[1] as nat) * b64);
+            assert(off_fe.to_nat() == (carry2 as nat) * c_sol);
+            assert((carry3 as nat) * p256 + s3_fe.to_nat() == (carry2 as nat) * c_sol + s2_fe.to_nat());
+            lemma_solinas_reduce_step(carry3 as nat, s3_fe.to_nat());
+
+            // Step 5: _carry4 == 0 and s4 == s3 + carry3 * C < 2^256 < 2 * p
+            assert(((offset2 >> 64u128) as nat) == 0) by(nonlinear_arith)
+                requires
+                    (offset2 as nat) == (carry3 as nat) * c_sol,
+                    (carry3 as nat) <= 1,
+                    c_sol == 4294968273_nat,
+                    (offset2 as nat) == ((offset2 >> 64u128) as nat) * 18446744073709551616_nat + ((#[verifier::truncate] (offset2 as u64)) as nat);
+            assert((offset2_limbs[1] as nat) == 0);
+            assert(off2_fe.to_nat() == (offset2_limbs[0] as nat) + (offset2_limbs[1] as nat) * b64);
+            assert(off2_fe.to_nat() == (carry3 as nat) * c_sol);
+            assert(off_fe.to_nat() <= c_sol);
+            if carry3 == 1 {
+                assert(s3_fe.to_nat() + p256 == s2_fe.to_nat() + off_fe.to_nat());
+                assert(s2_fe.to_nat() < p256);
+                assert(s3_fe.to_nat() < c_sol);
+                assert(s3_fe.to_nat() + off2_fe.to_nat() < 2 * c_sol);
+                assert(s3_fe.to_nat() + off2_fe.to_nat() < p256);
+            } else {
+                assert(carry3 == 0);
+                assert(off2_fe.to_nat() == 0);
+                assert(s3_fe.to_nat() + off2_fe.to_nat() < p256);
+            }
+            assert(_carry4 == 0);
+            assert(s4_fe.to_nat() == (carry3 as nat) * c_sol + s3_fe.to_nat());
+            assert(s4_fe.to_nat() < p256);
+            reveal(pow64_k);
+            assert((p256 as int) == p + (c_sol as int));
+            assert(s4_fe.to_nat() < 2 * spec_p());
+            assert(((self.to_nat() * other.to_nat()) as int) % p == (s4_fe.to_nat() as int) % p);
+        }
 
         let limbs = reduce_final(s4);
         Self { limbs }
@@ -4208,6 +5257,431 @@ pub fn evaluate_match_circuit(state: &mut PsiCircuitState) -> (res: FieldElement
     res
 }
 
+
+
+// TIER 3 ALGEBRAIC & ENTRY-POINT BOUNDARY PROOFS (RFC 9380 SWU, Batch Inversion, Curve Equation, VOLE, C-ABI)
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// RFC 9380 Simplified SWU denominator invariant: models d = (zu2^2 + zu2) mod p
+/// and proves canonical field bounds and exact zero-branch factorization zu2 * (zu2 + 1) === 0 (mod p).
+pub proof fn lemma_swu_denom_exceptional_branch(zu2: nat)
+    requires
+        zu2 < spec_p(),
+    ensures
+        ({
+            let d = spec_mod_add(spec_mod_square(zu2), zu2);
+            d < spec_p() &&
+            (d == spec_mod_mul(zu2, zu2 + 1))
+        }),
+{
+    lemma_p_bounds();
+    let p = spec_p() as int;
+    let x = zu2 as int;
+    let sq_mod = (x * x) % p;
+    let q = (x * x) / p;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(x * x, p);
+    assert(x * x + x == (sq_mod + x) + q * p) by(nonlinear_arith)
+        requires x * x == p * q + sq_mod;
+    vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(q, sq_mod + x, p);
+    assert(x * (x + 1) == x * x + x) by(nonlinear_arith);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// RFC 9380 3-isogeny projective homogenization invariant:
+/// For (X_out, Y_out, Z_out) = (x_num * y_den, y_prime * y_num * x_den, x_den * y_den) mod p,
+/// proves canonical field membership and cross-multiplied affine coordinate consistency
+/// X_out * x_den === x_num * Z_out (mod p).
+pub proof fn lemma_swu_isogeny_projective_consistency(
+    x_num: nat,
+    x_den: nat,
+    y_num: nat,
+    y_den: nat,
+    y_prime: nat,
+)
+    requires
+        x_num < spec_p(),
+        x_den < spec_p(),
+        y_num < spec_p(),
+        y_den < spec_p(),
+        y_prime < spec_p(),
+    ensures
+        ({
+            let z_out = spec_mod_mul(x_den, y_den);
+            let x_out = spec_mod_mul(x_num, y_den);
+            let y_out = spec_mod_mul(spec_mod_mul(y_prime, y_num), x_den);
+            x_out < spec_p() &&
+            y_out < spec_p() &&
+            z_out < spec_p() &&
+            spec_mod_mul(x_out, x_den) == spec_mod_mul(x_num, z_out)
+        }),
+{
+    lemma_p_bounds();
+    lemma_mul_assoc(x_num, y_den, x_den);
+    lemma_mul_comm(y_den, x_den);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Montgomery simultaneous batch-inversion backward telescoping identity:
+/// If inv_acc * (P_{i-1} * eff_i) === 1 (mod p), then:
+/// (1) (inv_acc * eff_i) * P_{i-1} === 1 (mod p) (accumulator invariant), and
+/// (2) (inv_acc * P_{i-1}) * eff_i === 1 (mod p) (extracted element inverse).
+pub proof fn lemma_batch_invert_telescoping_step(inv_acc: nat, p_prev: nat, eff_i: nat)
+    requires
+        spec_mod_mul(inv_acc, spec_mod_mul(p_prev, eff_i)) == 1,
+    ensures
+        spec_mod_mul(spec_mod_mul(inv_acc, eff_i), p_prev) == 1,
+        spec_mod_mul(spec_mod_mul(inv_acc, p_prev), eff_i) == 1,
+{
+    lemma_mul_assoc(inv_acc, p_prev, eff_i);
+    lemma_mul_assoc_comm(inv_acc, p_prev, eff_i);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Secp256k1 affine-to-projective curve equation invariant:
+/// If affine (x, y) satisfies y^2 === x^3 + 7 (mod p), then lifting to homogeneous projective
+/// coordinates (X, Y, Z) = (x, y, 1) satisfies Y^2 * Z === X^3 + 7 * Z^3 (mod p).
+pub proof fn lemma_secp256k1_curve_eq_from_affine(x: FieldElement, y: FieldElement)
+    requires
+        x.is_valid(),
+        y.is_valid(),
+        spec_mod_square(y.to_nat()) == spec_mod_add(
+            spec_mod_mul(spec_mod_square(x.to_nat()), x.to_nat()),
+            7,
+        ),
+    ensures
+        ({
+            let z: nat = 1;
+            let lhs = spec_mod_mul(spec_mod_square(y.to_nat()), z);
+            let z2 = spec_mod_square(z);
+            let z3 = spec_mod_mul(z2, z);
+            let rhs = spec_mod_add(
+                spec_mod_mul(spec_mod_square(x.to_nat()), x.to_nat()),
+                spec_mod_mul(7, z3),
+            );
+            lhs == rhs
+        }),
+{
+    lemma_p_bounds();
+    let y2 = spec_mod_square(y.to_nat());
+    assert(y2 < spec_p());
+    lemma_mul_one(y2);
+    lemma_small_mod(y2 as int, spec_p() as int);
+    assert(spec_mod_mul(y2, 1) == y2);
+    assert(spec_mod_square(1) == 1nat % spec_p());
+    lemma_small_mod(1, spec_p() as int);
+    assert(spec_mod_mul(1, 1) == 1);
+    assert(spec_mod_mul(7, 1) == 7nat % spec_p());
+    lemma_small_mod(7, spec_p() as int);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Base generator G membership proof: verifies that the canonical secp256k1 generator point
+/// G = (Gx, Gy) satisfies Gy^2 === Gx^3 + 7 (mod p).
+pub proof fn lemma_secp256k1_generator_on_curve()
+    ensures
+        ({
+            let gx = FieldElement {
+                limbs: [
+                    0x59F2815B16F81798,
+                    0x029BFCDB2DCE28D9,
+                    0x55A06295CE870B07,
+                    0x79BE667EF9DCBBAC,
+                ],
+            };
+            let gy = FieldElement {
+                limbs: [
+                    0x9C47D08FFB10D4B8,
+                    0xFD17B448A6855419,
+                    0x5DA4FBFC0E1108A8,
+                    0x483ADA7726A3C465,
+                ],
+            };
+            spec_mod_square(gy.to_nat()) == spec_mod_add(
+                spec_mod_mul(spec_mod_square(gx.to_nat()), gx.to_nat()),
+                7,
+            )
+        }),
+{
+    reveal(FieldElement::to_nat);
+    lemma_p_bounds();
+    let gx = FieldElement {
+        limbs: [
+            0x59F2815B16F81798,
+            0x029BFCDB2DCE28D9,
+            0x55A06295CE870B07,
+            0x79BE667EF9DCBBAC,
+        ],
+    };
+    let gy = FieldElement {
+        limbs: [
+            0x9C47D08FFB10D4B8,
+            0xFD17B448A6855419,
+            0x5DA4FBFC0E1108A8,
+            0x483ADA7726A3C465,
+        ],
+    };
+    let p = spec_p() as int;
+    let x = gx.to_nat() as int;
+    let y = gy.to_nat() as int;
+    let x2_mod = (x * x) % p;
+    let x3_mod = (x2_mod * x) % p;
+    let rhs = (x3_mod + 7) % p;
+    let lhs = (y * y) % p;
+    assert(lhs == rhs) by(nonlinear_arith)
+        requires
+            p == 115792089237316195423570985008687907853269984665640564039457584007908834671663_int,
+            x == 55066263022277343669578718895168534326250603453777594175500187360389116729240_int,
+            y == 32670510020758816978083085130507043184471273380659243275938904335757337482424_int,
+            x2_mod == (x * x) % p,
+            x3_mod == (x2_mod * x) % p,
+            rhs == (x3_mod + 7) % p,
+            lhs == (y * y) % p;
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// VOLE subfield linear MAC homomorphic identity over F_p:
+/// Proves (a + delta * x) + (b + delta * y) === (a + b) + delta * (x + y) (mod p).
+pub proof fn lemma_vole_subfield_linear_homomorphism(a: nat, b: nat, delta: nat, x: nat, y: nat)
+    ensures
+        spec_mod_add(
+            spec_mod_add(a, spec_mod_mul(delta, x)),
+            spec_mod_add(b, spec_mod_mul(delta, y)),
+        ) == spec_mod_add(
+            spec_mod_add(a, b),
+            spec_mod_mul(delta, spec_mod_add(x, y)),
+        ),
+{
+    lemma_p_bounds();
+    let p = spec_p() as int;
+    let ai = a as int;
+    let bi = b as int;
+    let di = delta as int;
+    let xi = x as int;
+    let yi = y as int;
+
+    let dx_mod = (di * xi) % p;
+    let dy_mod = (di * yi) % p;
+
+    lemma_mul_mod_noop_right(di, xi + yi, p);
+    assert((di * ((xi + yi) % p)) % p == (di * (xi + yi)) % p);
+
+    let qx = (di * xi) / p;
+    let qy = (di * yi) / p;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(di * xi, p);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(di * yi, p);
+
+    let lhs_inner = ((ai + dx_mod) % p) + ((bi + dy_mod) % p);
+    let ql1 = (ai + dx_mod) / p;
+    let ql2 = (bi + dy_mod) / p;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(ai + dx_mod, p);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(bi + dy_mod, p);
+
+    let qr1 = (ai + bi) / p;
+    let qr2 = (di * (xi + yi)) / p;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(ai + bi, p);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(di * (xi + yi), p);
+
+    let base = (ai + bi) % p + ((di * (xi + yi)) % p);
+    let k_mult = qr1 + qr2 - qx - qy - ql1 - ql2;
+    assert(lhs_inner == base + k_mult * p) by(nonlinear_arith)
+        requires
+            di * xi == p * qx + dx_mod,
+            di * yi == p * qy + dy_mod,
+            ai + dx_mod == p * ql1 + ((ai + dx_mod) % p),
+            bi + dy_mod == p * ql2 + ((bi + dy_mod) % p),
+            ai + bi == p * qr1 + ((ai + bi) % p),
+            di * (xi + yi) == p * qr2 + ((di * (xi + yi)) % p),
+            lhs_inner == ((ai + dx_mod) % p) + ((bi + dy_mod) % p),
+            base == ((ai + bi) % p) + ((di * (xi + yi)) % p),
+            k_mult == qr1 + qr2 - qx - qy - ql1 - ql2;
+
+    vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(k_mult, base, p);
+}
+
+/// Satisfies [FR-07-SIMDTUN]
+/// Satisfies [FR-12-FORMALSPEC]
+/// SIMD / scalar 256-bit lane multiplexer equivalence lemma:
+/// Proves that 4-limb bitwise lane masking matches branchless FieldElement selection.
+pub proof fn lemma_simd_lane_select_equivalence(d: [u64; 4], s: [u64; 4], cond: u64)
+    requires
+        cond == 0 || cond == 1,
+    ensures
+        ({
+            let mask = !(cond.wrapping_sub(1u64));
+            let selected = [
+                (d[0] & mask) | (s[0] & !mask),
+                (d[1] & mask) | (s[1] & !mask),
+                (d[2] & mask) | (s[2] & !mask),
+                (d[3] & mask) | (s[3] & !mask),
+            ];
+            (cond == 1 ==> (FieldElement { limbs: selected }).to_nat() == (FieldElement { limbs: d }).to_nat()) &&
+            (cond == 0 ==> (FieldElement { limbs: selected }).to_nat() == (FieldElement { limbs: s }).to_nat())
+        }),
+{
+    let mask = !(cond.wrapping_sub(1u64));
+    lemma_sub_condition_mask(cond);
+    lemma_select_u64(d[0], s[0], mask);
+    lemma_select_u64(d[1], s[1], mask);
+    lemma_select_u64(d[2], s[2], mask);
+    lemma_select_u64(d[3], s[3], mask);
+    reveal(FieldElement::to_nat);
+}
+
+/// Satisfies [FR-22-DPCARD]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Differential Privacy cardinality clamping invariant:
+/// Proves that clamping (raw_cardinality + noise) into [0, n_elements] strictly preserves
+/// 0 <= clamped <= n_elements across all 64-bit signed Laplace noise samples.
+pub proof fn lemma_dp_cardinality_clamp_bounds(raw_cardinality: u64, noise: i64, n_elements: u64)
+    requires
+        raw_cardinality <= n_elements,
+    ensures
+        ({
+            let raw_i128 = raw_cardinality as i128;
+            let noisy_i128 = raw_i128 + (noise as i128);
+            let clamped: u64 = if noisy_i128 < 0 {
+                0u64
+            } else if noisy_i128 > (n_elements as i128) {
+                n_elements
+            } else {
+                #[verifier::truncate] (noisy_i128 as u64)
+            };
+            clamped <= n_elements
+        }),
+{
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Radix-2^64 canonical limb uniqueness proof: equal mathematical values imply identical 64-bit limbs.
+pub proof fn lemma_fe_to_nat_injective(a: FieldElement, b: FieldElement)
+    requires
+        a.to_nat() == b.to_nat(),
+    ensures
+        a.limbs[0] == b.limbs[0],
+        a.limbs[1] == b.limbs[1],
+        a.limbs[2] == b.limbs[2],
+        a.limbs[3] == b.limbs[3],
+{
+    reveal(FieldElement::to_nat);
+    let b64: int = 18446744073709551616_int;
+    let a0 = a.limbs[0] as int;
+    let a1 = a.limbs[1] as int;
+    let a2 = a.limbs[2] as int;
+    let a3 = a.limbs[3] as int;
+    let b0 = b.limbs[0] as int;
+    let b1 = b.limbs[1] as int;
+    let b2 = b.limbs[2] as int;
+    let b3 = b.limbs[3] as int;
+
+    let qa = a1 + a2 * b64 + a3 * b64 * b64;
+    let qb = b1 + b2 * b64 + b3 * b64 * b64;
+    assert(a0 + qa * b64 == b0 + qb * b64) by(nonlinear_arith)
+        requires
+            a.to_nat() == b.to_nat(),
+            a0 == a.limbs[0] as int, a1 == a.limbs[1] as int, a2 == a.limbs[2] as int, a3 == a.limbs[3] as int,
+            b0 == b.limbs[0] as int, b1 == b.limbs[1] as int, b2 == b.limbs[2] as int, b3 == b.limbs[3] as int,
+            qa == a1 + a2 * b64 + a3 * b64 * b64,
+            qb == b1 + b2 * b64 + b3 * b64 * b64;
+    lemma_div_converse(a0 + qa * b64, b64, qa, a0);
+    lemma_div_converse(b0 + qb * b64, b64, qb, b0);
+    assert(a0 == b0);
+    assert(qa == qb);
+
+    let qa2 = a2 + a3 * b64;
+    let qb2 = b2 + b3 * b64;
+    assert(a1 + qa2 * b64 == b1 + qb2 * b64) by(nonlinear_arith)
+        requires
+            qa == qb,
+            qa == a1 + a2 * b64 + a3 * b64 * b64,
+            qb == b1 + b2 * b64 + b3 * b64 * b64,
+            qa2 == a2 + a3 * b64,
+            qb2 == b2 + b3 * b64;
+    lemma_div_converse(a1 + qa2 * b64, b64, qa2, a1);
+    lemma_div_converse(b1 + qb2 * b64, b64, qb2, b1);
+    assert(a1 == b1);
+    assert(qa2 == qb2);
+
+    lemma_div_converse(a2 + a3 * b64, b64, a3, a2);
+    lemma_div_converse(b2 + b3 * b64, b64, b3, b2);
+    assert(a2 == b2);
+    assert(a3 == b3);
+}
+
+/// Satisfies [FR-06-PSIMALG]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Executable constant-time affine curve membership validator for secp256k1:
+/// Verifies y^2 === x^3 + 7 (mod p) in constant time.
+#[must_use]
+pub fn verify_curve_point_on_secp256k1(x: &FieldElement, y: &FieldElement) -> (is_on_curve: bool)
+    requires
+        x.is_valid(),
+        y.is_valid(),
+    ensures
+        is_on_curve <==> (
+            spec_mod_square(y.to_nat()) == spec_mod_add(
+                spec_mod_mul(spec_mod_square(x.to_nat()), x.to_nat()),
+                7,
+            )
+        ),
+{
+    proof {
+        lemma_p_bounds();
+    }
+    let seven = FieldElement { limbs: [7, 0, 0, 0] };
+    proof {
+        lemma_b3_is_valid();
+        reveal(FieldElement::to_nat);
+        assert(seven.to_nat() == 7);
+        assert(seven.is_valid());
+    }
+    let lhs = y.square();
+    let x2 = x.square();
+    let x3 = x2.mul(x);
+    let rhs = x3.add(&seven);
+
+    let eq0 = lhs.limbs[0] == rhs.limbs[0];
+    let eq1 = lhs.limbs[1] == rhs.limbs[1];
+    let eq2 = lhs.limbs[2] == rhs.limbs[2];
+    let eq3 = lhs.limbs[3] == rhs.limbs[3];
+    let is_on_curve = eq0 && eq1 && eq2 && eq3;
+
+    proof {
+        if lhs.to_nat() == rhs.to_nat() {
+            lemma_fe_to_nat_injective(lhs, rhs);
+        }
+    }
+    is_on_curve
+}
+
+/// Satisfies [FR-08-GATEKEEPR]
+/// Satisfies [FR-12-FORMALSPEC]
+/// Executable C-ABI ingress batch buffer-bound validation contract:
+/// Enforces 1 <= n_elements <= 128, input byte capacity >= n_elements * 64,
+/// and output byte capacity >= n_elements * 32 with zero integer overflow.
+#[must_use]
+pub fn validate_c_abi_batch_bounds(n_elements: usize, in_len: usize, out_len: usize) -> (ok: bool)
+    ensures
+        ok <==> (
+            1 <= n_elements &&
+            n_elements <= 128 &&
+            in_len >= n_elements * 64 &&
+            out_len >= n_elements * 32
+        ),
+{
+    if n_elements == 0 || n_elements > 128 {
+        return false;
+    }
+    let req_in = n_elements * 64;
+    let req_out = n_elements * 32;
+    in_len >= req_in && out_len >= req_out
+}
 
 } // verus!
 
