@@ -37,6 +37,7 @@ nona/
 │   ├── C_ABI.md                     # Darwin/Apple Mach-O static linkage guide
 │   ├── HAVH.md                      # High-Assurance Verification Harness (5-tier certification)
 │   ├── HARDWARE_SEMANTICS.md        # Silicon memory consistency (TSO vs aarch64), DSE & errata audit
+│   ├── KMS_ATTESTATION.md           # AWS Nitro Enclave & KMS Recipient key-release protocol
 │   ├── TCB.md                       # Trusted Computing Base & SMT axiom boundaries
 │   └── THREAT_MODEL.md              # STPA/PASTA adversarial host & vsock threat boundaries
 ├── .dockerignore                    # Container build context exclusion filter for reproducible builds
@@ -61,8 +62,11 @@ nona/
 ├── deploy/
 │   └── run_nitro.sh                 # One-command AWS Nitro Enclave provisioning harness
 ├── fuzz/
+│   ├── Cargo.toml                   # Continuous fuzzing harness manifest (4 libFuzzer targets)
 │   └── fuzz_targets/
+│       ├── fuzz_c_abi_ffi.rs        # Continuous fuzzing: C-ABI FFI perimeter & buffer aliasing
 │       ├── fuzz_ingest.rs           # Continuous fuzzing: raw stream deserialization
+│       ├── fuzz_kms_envelope.rs     # Continuous fuzzing: attested KMS Recipient envelope unwrapping
 │       └── fuzz_wire_dispatch.rs    # Continuous fuzzing: vsock packet parsing
 ├── init.sh                          # Hermetic enclave PID 1 init entrypoint & devtmpfs bootstrap
 ├── include/                                  # Monomorphic C99 C-ABI headers

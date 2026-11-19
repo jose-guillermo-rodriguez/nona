@@ -6,7 +6,10 @@ use crate::attestation::{
     AttestationDocumentBuffer, ATTESTATION_MAX_DOC_SIZE, NONA_ERR_ATTEST_OVERFLOW,
     SECP256K1_PUBKEY_COMPRESSED_SIZE,
 };
-use crate::crypto::{ct_zeroize, sha512_digest};
+use crate::crypto::{
+    ct_eq_32_bytes, ct_zeroize, sha512_digest, unwrap_attested_recipient_envelope,
+    AttestedKeyEnvelope, ATTESTED_ENVELOPE_WIRE_SIZE,
+};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
@@ -24,6 +27,7 @@ pub const CMD_BLIND_PHASE1: u16 = 0x0003;
 pub const CMD_ATTEST: u16 = 0x0004;
 pub const CMD_PHASE2_REBLIND: u16 = 0x0005;
 pub const CMD_PHASE2_INTERSECT: u16 = 0x0006;
+pub const CMD_KMS_RECIPIENT_UNWRAP: u16 = 0x0007;
 
 pub const FLAG_USE_SESSION_KEY: u32 = 0x0001;
 pub const MAX_PAYLOAD_SIZE: usize = 16384;
@@ -45,12 +49,17 @@ const SESSION_STATE_UNINIT: u8 = 0;
 const SESSION_STATE_INITIALIZING: u8 = 1;
 const SESSION_STATE_READY: u8 = 2;
 
+const NONCE_REPLAY_RING_CAP: usize = 64;
+
 struct EnclaveSessionKey {
     state: AtomicU8,
     epoch: AtomicU64,
     op_count: AtomicU64,
+    ephemeral_recipient_active: AtomicBool,
     privkey: core::cell::UnsafeCell<[u8; 32]>,
     pubkey: core::cell::UnsafeCell<[u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]>,
+    ephemeral_privkey: core::cell::UnsafeCell<[u8; 32]>,
+    ephemeral_pubkey: core::cell::UnsafeCell<[u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]>,
 }
 
 unsafe impl Sync for EnclaveSessionKey {}
@@ -59,9 +68,136 @@ static SESSION_KEY: EnclaveSessionKey = EnclaveSessionKey {
     state: AtomicU8::new(SESSION_STATE_UNINIT),
     epoch: AtomicU64::new(0),
     op_count: AtomicU64::new(0),
+    ephemeral_recipient_active: AtomicBool::new(false),
     privkey: core::cell::UnsafeCell::new([0u8; 32]),
     pubkey: core::cell::UnsafeCell::new([0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]),
+    ephemeral_privkey: core::cell::UnsafeCell::new([0u8; 32]),
+    ephemeral_pubkey: core::cell::UnsafeCell::new([0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE]),
 };
+
+struct ExpectedPcrPolicy {
+    lock: AtomicBool,
+    configured: AtomicBool,
+    pcr0: core::cell::UnsafeCell<[u8; 48]>,
+    pcr1: core::cell::UnsafeCell<[u8; 48]>,
+    pcr2: core::cell::UnsafeCell<[u8; 48]>,
+}
+
+unsafe impl Sync for ExpectedPcrPolicy {}
+
+static EXPECTED_PCR_POLICY: ExpectedPcrPolicy = ExpectedPcrPolicy {
+    lock: AtomicBool::new(false),
+    configured: AtomicBool::new(false),
+    pcr0: core::cell::UnsafeCell::new([0u8; 48]),
+    pcr1: core::cell::UnsafeCell::new([0u8; 48]),
+    pcr2: core::cell::UnsafeCell::new([0u8; 48]),
+};
+
+struct ConsumedNonceRing {
+    lock: AtomicBool,
+    cursor: core::cell::UnsafeCell<usize>,
+    entries: core::cell::UnsafeCell<[[u8; 32]; NONCE_REPLAY_RING_CAP]>,
+}
+
+unsafe impl Sync for ConsumedNonceRing {}
+
+static CONSUMED_NONCES: ConsumedNonceRing = ConsumedNonceRing {
+    lock: AtomicBool::new(false),
+    cursor: core::cell::UnsafeCell::new(0),
+    entries: core::cell::UnsafeCell::new([[0u8; 32]; NONCE_REPLAY_RING_CAP]),
+};
+
+#[inline(never)]
+pub fn configure_expected_pcr_policy(pcr0: &[u8; 48], pcr1: &[u8; 48], pcr2: &[u8; 48]) {
+    while EXPECTED_PCR_POLICY
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        (*EXPECTED_PCR_POLICY.pcr0.get()).copy_from_slice(pcr0);
+        (*EXPECTED_PCR_POLICY.pcr1.get()).copy_from_slice(pcr1);
+        (*EXPECTED_PCR_POLICY.pcr2.get()).copy_from_slice(pcr2);
+    }
+    EXPECTED_PCR_POLICY.configured.store(true, Ordering::Release);
+    EXPECTED_PCR_POLICY.lock.store(false, Ordering::Release);
+}
+
+#[inline(never)]
+fn load_expected_pcr_policy() -> Option<([u8; 48], [u8; 48], [u8; 48])> {
+    if !EXPECTED_PCR_POLICY.configured.load(Ordering::Acquire) {
+        return None;
+    }
+    while EXPECTED_PCR_POLICY
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let triple = unsafe {
+        (
+            *EXPECTED_PCR_POLICY.pcr0.get(),
+            *EXPECTED_PCR_POLICY.pcr1.get(),
+            *EXPECTED_PCR_POLICY.pcr2.get(),
+        )
+    };
+    EXPECTED_PCR_POLICY.lock.store(false, Ordering::Release);
+    Some(triple)
+}
+
+#[inline(never)]
+fn check_and_record_single_use_nonce(nonce: &[u8; 32]) -> bool {
+    if *nonce == [0u8; 32] {
+        return false;
+    }
+    while CONSUMED_NONCES
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let entries = unsafe { &mut *CONSUMED_NONCES.entries.get() };
+    let cursor = unsafe { &mut *CONSUMED_NONCES.cursor.get() };
+    let mut replay_found = 0u64;
+    let mut i = 0;
+    while i < NONCE_REPLAY_RING_CAP {
+        replay_found |= ct_eq_32_bytes(&entries[i], nonce);
+        i += 1;
+    }
+    let accepted = replay_found == 0;
+    if accepted {
+        let idx = *cursor % NONCE_REPLAY_RING_CAP;
+        entries[idx].copy_from_slice(nonce);
+        *cursor = idx.wrapping_add(1);
+    }
+    CONSUMED_NONCES.lock.store(false, Ordering::Release);
+    accepted
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn reset_nonce_replay_cache() {
+    while CONSUMED_NONCES
+        .lock
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        let entries = &mut *CONSUMED_NONCES.entries.get();
+        let mut i = 0;
+        while i < NONCE_REPLAY_RING_CAP {
+            ct_zeroize(&mut entries[i]);
+            i += 1;
+        }
+        *CONSUMED_NONCES.cursor.get() = 0;
+    }
+    CONSUMED_NONCES.lock.store(false, Ordering::Release);
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -189,6 +325,13 @@ impl EnclaveRequestHeader {
                     Err(-3)
                 } else {
                     Ok(plen)
+                }
+            }
+            CMD_KMS_RECIPIENT_UNWRAP => {
+                if plen == ATTESTED_ENVELOPE_WIRE_SIZE {
+                    Ok(plen)
+                } else {
+                    Err(-3)
                 }
             }
             _ => Err(-102),
@@ -373,12 +516,149 @@ pub fn purge_session_key_unconditional() {
     unsafe {
         ct_zeroize(&mut *SESSION_KEY.privkey.get());
         ct_zeroize(&mut *SESSION_KEY.pubkey.get());
+        ct_zeroize(&mut *SESSION_KEY.ephemeral_privkey.get());
+        ct_zeroize(&mut *SESSION_KEY.ephemeral_pubkey.get());
     }
+    SESSION_KEY
+        .ephemeral_recipient_active
+        .store(false, Ordering::SeqCst);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     SESSION_KEY.op_count.store(0, Ordering::SeqCst);
     SESSION_KEY
         .state
         .store(SESSION_STATE_UNINIT, Ordering::SeqCst);
+}
+
+/// Provisions an ephemeral recipient keypair from `/dev/nsm` hardware entropy
+/// and returns its 33-byte SEC 1 compressed public key.
+#[inline(never)]
+pub fn provision_ephemeral_recipient_keypair() -> [u8; SECP256K1_PUBKEY_COMPRESSED_SIZE] {
+    let mut priv_buf = AlignedKeyBuffer { data: [0u8; 32] };
+    fill_nsm_entropy_or_abort(&mut priv_buf.data);
+    let mut pub_buf = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
+    if derive_compressed_public_key(&priv_buf.data, &mut pub_buf) != 0 {
+        ct_zeroize(&mut priv_buf.data);
+        crate::exception::zeroize_and_abort(crate::gatekeeper::NONA_ERR_INTERNAL_PANIC);
+    }
+    unsafe {
+        (*SESSION_KEY.ephemeral_privkey.get()).copy_from_slice(&priv_buf.data);
+        (*SESSION_KEY.ephemeral_pubkey.get()).copy_from_slice(&pub_buf);
+    }
+    ct_zeroize(&mut priv_buf.data);
+    SESSION_KEY
+        .ephemeral_recipient_active
+        .store(true, Ordering::SeqCst);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    pub_buf
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn provision_ephemeral_recipient_from_seed(
+    seed: &[u8; 32],
+) -> Result<[u8; SECP256K1_PUBKEY_COMPRESSED_SIZE], i32> {
+    let mut pub_buf = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
+    if derive_compressed_public_key(seed, &mut pub_buf) != 0 {
+        return Err(-1);
+    }
+    unsafe {
+        (*SESSION_KEY.ephemeral_privkey.get()).copy_from_slice(seed);
+        (*SESSION_KEY.ephemeral_pubkey.get()).copy_from_slice(&pub_buf);
+    }
+    SESSION_KEY
+        .ephemeral_recipient_active
+        .store(true, Ordering::SeqCst);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    Ok(pub_buf)
+}
+
+#[cfg(any(test, feature = "std"))]
+pub fn inspect_ephemeral_recipient_privkey_is_zeroized() -> bool {
+    let is_inactive = !SESSION_KEY.ephemeral_recipient_active.load(Ordering::SeqCst);
+    let priv_zero = unsafe { (*SESSION_KEY.ephemeral_privkey.get()).iter().all(|&b| b == 0) };
+    is_inactive && priv_zero
+}
+
+/// Unwraps a KMS `CiphertextForRecipient` `AttestedKeyEnvelope` using the enclave's ephemeral
+/// private key, installs the unwrapped session blinding scalar into `SESSION_KEY`, and
+/// immediately destroys the ephemeral private key with `write_volatile` + `SeqCst`.
+#[inline(never)]
+pub fn install_attested_recipient_session_key(
+    expected_nonce: &[u8; 32],
+    envelope_bytes: &[u8],
+) -> Result<(), i32> {
+    if !SESSION_KEY.ephemeral_recipient_active.load(Ordering::Acquire) {
+        purge_session_key_unconditional();
+        return Err(-1);
+    }
+    let Some((exp_pcr0, exp_pcr1, exp_pcr2)) = load_expected_pcr_policy() else {
+        purge_session_key_unconditional();
+        return Err(-1);
+    };
+    if !check_and_record_single_use_nonce(expected_nonce) {
+        purge_session_key_unconditional();
+        return Err(-1);
+    }
+
+    let Ok(envelope) = AttestedKeyEnvelope::from_wire_bytes(envelope_bytes) else {
+        purge_session_key_unconditional();
+        return Err(-1);
+    };
+
+    let mut eph_priv = AlignedKeyBuffer { data: [0u8; 32] };
+    let mut eph_pub = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
+    unsafe {
+        eph_priv
+            .data
+            .copy_from_slice(&*SESSION_KEY.ephemeral_privkey.get());
+        eph_pub.copy_from_slice(&*SESSION_KEY.ephemeral_pubkey.get());
+        ct_zeroize(&mut *SESSION_KEY.ephemeral_privkey.get());
+    }
+    SESSION_KEY
+        .ephemeral_recipient_active
+        .store(false, Ordering::SeqCst);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+    let mut unwrapped_secret = AlignedKeyBuffer { data: [0u8; 32] };
+    let unwrap_res = unwrap_attested_recipient_envelope(
+        &mut eph_priv.data,
+        &eph_pub,
+        expected_nonce,
+        &exp_pcr0,
+        &exp_pcr1,
+        &exp_pcr2,
+        &envelope,
+        &mut unwrapped_secret.data,
+    );
+    ct_zeroize(&mut eph_priv.data);
+    ct_zeroize(&mut eph_pub);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+    if unwrap_res.is_err() {
+        ct_zeroize(&mut unwrapped_secret.data);
+        purge_session_key_unconditional();
+        return Err(-1);
+    }
+
+    let mut session_pub = [0u8; SECP256K1_PUBKEY_COMPRESSED_SIZE];
+    if derive_compressed_public_key(&unwrapped_secret.data, &mut session_pub) != 0 {
+        ct_zeroize(&mut unwrapped_secret.data);
+        purge_session_key_unconditional();
+        return Err(-1);
+    }
+
+    unsafe {
+        (*SESSION_KEY.privkey.get()).copy_from_slice(&unwrapped_secret.data);
+        (*SESSION_KEY.pubkey.get()).copy_from_slice(&session_pub);
+    }
+    ct_zeroize(&mut unwrapped_secret.data);
+    ct_zeroize(&mut session_pub);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    SESSION_KEY.op_count.store(0, Ordering::SeqCst);
+    SESSION_KEY.epoch.fetch_add(1, Ordering::SeqCst);
+    SESSION_KEY
+        .state
+        .store(SESSION_STATE_READY, Ordering::Release);
+    Ok(())
 }
 
 #[cfg(any(test, feature = "std"))]
@@ -548,6 +828,8 @@ pub enum SessionPhase {
 pub struct VsockSessionState {
     phase: SessionPhase,
     ops_in_session: u64,
+    bound_challenge_nonce: [u8; 32],
+    has_bound_nonce: bool,
 }
 
 impl Default for VsockSessionState {
@@ -561,6 +843,8 @@ impl VsockSessionState {
         Self {
             phase: SessionPhase::Unattested,
             ops_in_session: 0,
+            bound_challenge_nonce: [0u8; 32],
+            has_bound_nonce: false,
         }
     }
 
@@ -580,6 +864,8 @@ impl VsockSessionState {
     #[inline(never)]
     pub fn fail_closed_with_slot(&mut self, slot: &mut EnclaveConnectionSlot) {
         slot.purge();
+        ct_zeroize(&mut self.bound_challenge_nonce);
+        self.has_bound_nonce = false;
         self.ops_in_session = 0;
         self.phase = SessionPhase::ClosedZeroized;
         core::sync::atomic::compiler_fence(Ordering::SeqCst);
@@ -595,7 +881,10 @@ impl VsockSessionState {
                     | SessionPhase::Phase2Reblinded,
                 CMD_PING,
             ) | (SessionPhase::Unattested, CMD_ATTEST)
-                | (SessionPhase::AttestedBound, CMD_INGEST | CMD_BLIND_PHASE1)
+                | (
+                    SessionPhase::AttestedBound,
+                    CMD_KMS_RECIPIENT_UNWRAP | CMD_INGEST | CMD_BLIND_PHASE1
+                )
                 | (
                     SessionPhase::Phase1Blinded,
                     CMD_BLIND_PHASE1 | CMD_PHASE2_REBLIND
@@ -688,13 +977,32 @@ impl VsockSessionState {
             return (NONA_WIRE_ERR_OPAQUE, 0);
         }
 
-        let (status, out_len) = dispatch_frame_with_slot(
-            req_header,
-            payload,
-            resp_payload,
-            scratch_buffer,
-            attestation_doc,
-        );
+        let (status, out_len) = if req_header.command == CMD_KMS_RECIPIENT_UNWRAP {
+            if !self.has_bound_nonce {
+                ct_zeroize(resp_payload);
+                scratch_buffer.purge();
+                attestation_doc.purge();
+                ct_zeroize(&mut self.bound_challenge_nonce);
+                self.ops_in_session = 0;
+                self.phase = SessionPhase::ClosedZeroized;
+                return (NONA_WIRE_ERR_OPAQUE, 0);
+            }
+            let nonce_copy = self.bound_challenge_nonce;
+            ct_zeroize(&mut self.bound_challenge_nonce);
+            self.has_bound_nonce = false;
+            match install_attested_recipient_session_key(&nonce_copy, payload) {
+                Ok(()) => (0, 0),
+                Err(_) => (NONA_WIRE_ERR_OPAQUE, 0),
+            }
+        } else {
+            dispatch_frame_with_slot(
+                req_header,
+                payload,
+                resp_payload,
+                scratch_buffer,
+                attestation_doc,
+            )
+        };
 
         #[cfg(feature = "std")]
         let attestation_sim_pending =
@@ -711,10 +1019,14 @@ impl VsockSessionState {
             return (status, 0);
         }
 
+        if req_header.command == CMD_ATTEST && payload.len() == 32 {
+            self.bound_challenge_nonce.copy_from_slice(payload);
+            self.has_bound_nonce = true;
+        }
         self.ops_in_session = next_ops;
         self.phase = match req_header.command {
             CMD_PING => self.phase,
-            CMD_ATTEST | CMD_INGEST => SessionPhase::AttestedBound,
+            CMD_ATTEST | CMD_KMS_RECIPIENT_UNWRAP | CMD_INGEST => SessionPhase::AttestedBound,
             CMD_BLIND_PHASE1 => SessionPhase::Phase1Blinded,
             CMD_PHASE2_REBLIND => SessionPhase::Phase2Reblinded,
             CMD_PHASE2_INTERSECT => SessionPhase::Phase2Intersected,
@@ -944,6 +1256,17 @@ pub fn dispatch_frame_with_slot(
         ),
         CMD_PHASE2_INTERSECT => {
             execute_wire_phase2_intersect(payload, resp_payload, scratch_buffer)
+        }
+        CMD_KMS_RECIPIENT_UNWRAP => {
+            if payload.len() != ATTESTED_ENVELOPE_WIRE_SIZE {
+                return (-3, 0);
+            }
+            let mut nonce = [0u8; 32];
+            nonce.copy_from_slice(&payload[0..32]);
+            match install_attested_recipient_session_key(&nonce, payload) {
+                Ok(()) => (0, 0),
+                Err(_) => (NONA_WIRE_ERR_OPAQUE, 0),
+            }
         }
         CMD_ATTEST => {
             let client_nonce: Option<&[u8]> = if payload.is_empty() {

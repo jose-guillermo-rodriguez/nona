@@ -79,6 +79,20 @@ required-features = ["std"]
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_c_abi_ffi"
+path = "fuzz/fuzz_targets/fuzz_c_abi_ffi.rs"
+required-features = ["std"]
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_kms_envelope"
+path = "fuzz/fuzz_targets/fuzz_kms_envelope.rs"
+required-features = ["std"]
+test = false
+doc = false
+
 [[test]]
 name = "test_fuzz_smoke"
 path = "tests/integration/test_fuzz_smoke.rs"
@@ -161,3 +175,8 @@ required-features = ["std"]
 name = "test_vsock_perimeter_bounds"
 path = "tests/integration/test_vsock_perimeter_bounds.rs"
 harness = false
+
+[[test]]
+name = "test_kms_recipient_binding"
+path = "tests/integration/test_kms_recipient_binding.rs"
+required-features = ["std"]

@@ -83,6 +83,7 @@ TerminalEnclavePhases == {"Phase2Intersected", "ClosedZeroized"}
 Commands == {
     "CMD_PING",
     "CMD_ATTEST",
+    "CMD_KMS_RECIPIENT_UNWRAP",
     "CMD_INGEST",
     "CMD_BLIND_PHASE1",
     "CMD_PHASE2_REBLIND",
@@ -114,6 +115,8 @@ IsCommandAllowedInPhase(cmd, phase, attested) ==
             phase \in {"Unattested", "AttestedBound", "Phase1Blinded", "Phase2Reblinded"}
       [] cmd = "CMD_ATTEST" ->
             phase = "Unattested"
+      [] cmd = "CMD_KMS_RECIPIENT_UNWRAP" ->
+            phase = "AttestedBound" /\ attested = TRUE
       [] cmd = "CMD_INGEST" ->
             phase = "AttestedBound" /\ attested = TRUE
       [] cmd = "CMD_BLIND_PHASE1" ->

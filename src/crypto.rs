@@ -1718,3 +1718,383 @@ mod adaptive_routing_tests {
         }
     }
 }
+
+
+// ============================================================================
+// AWS KMS Attested Recipient Key-Release Envelope (#![no_std] / Zero-Heap)
+// ============================================================================
+
+pub const ATTESTED_ENVELOPE_WIRE_SIZE: usize = 258;
+pub const ATTESTED_ENVELOPE_KEY_LEN: usize = 32;
+pub const ATTESTED_ENVELOPE_TAG_LEN: usize = 16;
+pub const ATTESTED_PCR_LEN: usize = 48;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestedEnvelopeError {
+    InvalidLength,
+    InvalidRecipientKey,
+    InvalidSenderKey,
+    NonceMismatch,
+    PcrMismatch,
+    AuthenticationFailed,
+    InvalidUnwrappedScalar,
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(verus), derive(Zeroize, ZeroizeOnDrop))]
+pub struct AttestedKeyEnvelope {
+    pub challenge_nonce: [u8; 32],
+    pub pcr0: [u8; ATTESTED_PCR_LEN],
+    pub pcr1: [u8; ATTESTED_PCR_LEN],
+    pub pcr2: [u8; ATTESTED_PCR_LEN],
+    pub sender_ephemeral_pubkey: [u8; 33],
+    pub wrapped_key: [u8; ATTESTED_ENVELOPE_KEY_LEN],
+    pub auth_tag: [u8; ATTESTED_ENVELOPE_TAG_LEN],
+    pub key_len: u8,
+}
+
+#[inline(never)]
+pub fn ct_eq_16_bytes(a: &[u8; 16], b: &[u8; 16]) -> u64 {
+    let mut d: u64 = 0;
+    let mut i = 0;
+    while i < 16 {
+        d |= (a[i] ^ b[i]) as u64;
+        i += 1;
+    }
+    compiler_fence(Ordering::SeqCst);
+    ((d | 0u64.wrapping_sub(d)) >> 63) ^ 1
+}
+
+#[inline(never)]
+pub fn ct_eq_48_bytes(a: &[u8; 48], b: &[u8; 48]) -> u64 {
+    let mut d: u64 = 0;
+    let mut i = 0;
+    while i < 48 {
+        d |= (a[i] ^ b[i]) as u64;
+        i += 1;
+    }
+    compiler_fence(Ordering::SeqCst);
+    ((d | 0u64.wrapping_sub(d)) >> 63) ^ 1
+}
+
+#[cfg(not(verus))]
+#[inline(never)]
+fn derive_attested_recipient_keys(
+    shared_secret_x: &[u8; 32],
+    recipient_pubkey: &[u8; 33],
+    sender_pubkey: &[u8; 33],
+    out_enc_key: &mut [u8; 32],
+    out_mac_key: &mut [u8; 32],
+) {
+    let mut enc_input = [0u8; 123];
+    enc_input[0..25].copy_from_slice(b"NONA-KMS-RECIPIENT-ENC-V1");
+    enc_input[25..57].copy_from_slice(shared_secret_x);
+    enc_input[57..90].copy_from_slice(recipient_pubkey);
+    enc_input[90..123].copy_from_slice(sender_pubkey);
+    let enc_digest = sha512_digest(&enc_input);
+    out_enc_key.copy_from_slice(&enc_digest[..32]);
+    ct_zeroize(&mut enc_input);
+
+    let mut mac_input = [0u8; 123];
+    mac_input[0..25].copy_from_slice(b"NONA-KMS-RECIPIENT-MAC-V1");
+    mac_input[25..57].copy_from_slice(shared_secret_x);
+    mac_input[57..90].copy_from_slice(recipient_pubkey);
+    mac_input[90..123].copy_from_slice(sender_pubkey);
+    let mac_digest = sha512_digest(&mac_input);
+    out_mac_key.copy_from_slice(&mac_digest[..32]);
+    ct_zeroize(&mut mac_input);
+    compiler_fence(Ordering::SeqCst);
+}
+
+#[cfg(not(verus))]
+#[inline(never)]
+fn compute_attested_envelope_tag(
+    mac_key: &[u8; 32],
+    recipient_pubkey: &[u8; 33],
+    envelope: &AttestedKeyEnvelope,
+) -> [u8; 16] {
+    let mut auth_buf = [0u8; 332];
+    let mut off = 0;
+    auth_buf[off..off + 32].copy_from_slice(mac_key);
+    off += 32;
+    auth_buf[off..off + 25].copy_from_slice(b"NONA-KMS-RECIPIENT-TAG-V1");
+    off += 25;
+    auth_buf[off..off + 33].copy_from_slice(recipient_pubkey);
+    off += 33;
+    auth_buf[off..off + 32].copy_from_slice(&envelope.challenge_nonce);
+    off += 32;
+    auth_buf[off..off + 48].copy_from_slice(&envelope.pcr0);
+    off += 48;
+    auth_buf[off..off + 48].copy_from_slice(&envelope.pcr1);
+    off += 48;
+    auth_buf[off..off + 48].copy_from_slice(&envelope.pcr2);
+    off += 48;
+    auth_buf[off..off + 33].copy_from_slice(&envelope.sender_ephemeral_pubkey);
+    off += 33;
+    auth_buf[off..off + 32].copy_from_slice(&envelope.wrapped_key);
+    off += 32;
+    auth_buf[off] = envelope.key_len;
+
+    let digest = sha512_digest(&auth_buf);
+    ct_zeroize(&mut auth_buf);
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&digest[..16]);
+    tag
+}
+
+#[cfg(not(verus))]
+impl AttestedKeyEnvelope {
+    #[inline(never)]
+    pub fn to_wire_bytes(&self) -> [u8; ATTESTED_ENVELOPE_WIRE_SIZE] {
+        let mut out = [0u8; ATTESTED_ENVELOPE_WIRE_SIZE];
+        let mut off = 0;
+        out[off..off + 32].copy_from_slice(&self.challenge_nonce);
+        off += 32;
+        out[off..off + 48].copy_from_slice(&self.pcr0);
+        off += 48;
+        out[off..off + 48].copy_from_slice(&self.pcr1);
+        off += 48;
+        out[off..off + 48].copy_from_slice(&self.pcr2);
+        off += 48;
+        out[off..off + 33].copy_from_slice(&self.sender_ephemeral_pubkey);
+        off += 33;
+        out[off..off + 32].copy_from_slice(&self.wrapped_key);
+        off += 32;
+        out[off..off + 16].copy_from_slice(&self.auth_tag);
+        off += 16;
+        out[off] = self.key_len;
+        out
+    }
+
+    #[inline(never)]
+    pub fn from_wire_bytes(buf: &[u8]) -> Result<Self, AttestedEnvelopeError> {
+        if buf.len() != ATTESTED_ENVELOPE_WIRE_SIZE {
+            return Err(AttestedEnvelopeError::InvalidLength);
+        }
+        let mut challenge_nonce = [0u8; 32];
+        let mut pcr0 = [0u8; 48];
+        let mut pcr1 = [0u8; 48];
+        let mut pcr2 = [0u8; 48];
+        let mut sender_ephemeral_pubkey = [0u8; 33];
+        let mut wrapped_key = [0u8; 32];
+        let mut auth_tag = [0u8; 16];
+
+        let mut off = 0;
+        challenge_nonce.copy_from_slice(&buf[off..off + 32]);
+        off += 32;
+        pcr0.copy_from_slice(&buf[off..off + 48]);
+        off += 48;
+        pcr1.copy_from_slice(&buf[off..off + 48]);
+        off += 48;
+        pcr2.copy_from_slice(&buf[off..off + 48]);
+        off += 48;
+        sender_ephemeral_pubkey.copy_from_slice(&buf[off..off + 33]);
+        off += 33;
+        wrapped_key.copy_from_slice(&buf[off..off + 32]);
+        off += 32;
+        auth_tag.copy_from_slice(&buf[off..off + 16]);
+        off += 16;
+        let key_len = buf[off];
+        if key_len != 32 {
+            return Err(AttestedEnvelopeError::InvalidLength);
+        }
+
+        Ok(Self {
+            challenge_nonce,
+            pcr0,
+            pcr1,
+            pcr2,
+            sender_ephemeral_pubkey,
+            wrapped_key,
+            auth_tag,
+            key_len,
+        })
+    }
+
+    /// Constructs a recipient-bound key-release envelope (`CiphertextForRecipient`)
+    /// encrypted to `recipient_pubkey` and authenticated over `(nonce, pcr0, pcr1, pcr2)`.
+    #[inline(never)]
+    pub fn wrap_for_recipient(
+        sender_ephemeral_privkey: &[u8; 32],
+        recipient_pubkey: &[u8; 33],
+        challenge_nonce: &[u8; 32],
+        pcr0: &[u8; 48],
+        pcr1: &[u8; 48],
+        pcr2: &[u8; 48],
+        plaintext_key: &[u8; 32],
+    ) -> Result<Self, AttestedEnvelopeError> {
+        let sender_scalar = unsafe { Scalar::from_bytes_le(sender_ephemeral_privkey.as_ptr()) };
+        if sender_scalar.is_zero() || !sender_scalar.is_canonical() {
+            return Err(AttestedEnvelopeError::InvalidSenderKey);
+        }
+        let recipient_pt = crate::psi::ProjectivePoint::from_compressed_sec1(recipient_pubkey)
+            .ok_or(AttestedEnvelopeError::InvalidRecipientKey)?;
+
+        let mut sender_pubkey = [0u8; 33];
+        if crate::attestation::derive_compressed_public_key(
+            sender_ephemeral_privkey,
+            &mut sender_pubkey,
+        ) != 0
+        {
+            return Err(AttestedEnvelopeError::InvalidSenderKey);
+        }
+
+        let shared_pt = recipient_pt.scalar_mul(&sender_scalar);
+        if shared_pt.is_infinity() {
+            return Err(AttestedEnvelopeError::InvalidRecipientKey);
+        }
+        let shared_x_fe = shared_pt.to_affine_x();
+        let mut shared_x = [0u8; 32];
+        unsafe { shared_x_fe.to_bytes_le(shared_x.as_mut_ptr()) };
+
+        let mut enc_key = [0u8; 32];
+        let mut mac_key = [0u8; 32];
+        derive_attested_recipient_keys(
+            &shared_x,
+            recipient_pubkey,
+            &sender_pubkey,
+            &mut enc_key,
+            &mut mac_key,
+        );
+        ct_zeroize(&mut shared_x);
+
+        let mut wrapped_key = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            wrapped_key[i] = plaintext_key[i] ^ enc_key[i];
+            i += 1;
+        }
+        ct_zeroize(&mut enc_key);
+
+        let mut env = Self {
+            challenge_nonce: *challenge_nonce,
+            pcr0: *pcr0,
+            pcr1: *pcr1,
+            pcr2: *pcr2,
+            sender_ephemeral_pubkey: sender_pubkey,
+            wrapped_key,
+            auth_tag: [0u8; 16],
+            key_len: 32,
+        };
+        env.auth_tag = compute_attested_envelope_tag(&mac_key, recipient_pubkey, &env);
+        ct_zeroize(&mut mac_key);
+        compiler_fence(Ordering::SeqCst);
+        Ok(env)
+    }
+}
+
+#[cfg(not(verus))]
+#[inline(never)]
+fn unwrap_attested_recipient_envelope_inner(
+    ephemeral_privkey: &[u8; 32],
+    recipient_pubkey: &[u8; 33],
+    expected_nonce: &[u8; 32],
+    expected_pcr0: &[u8; 48],
+    expected_pcr1: &[u8; 48],
+    expected_pcr2: &[u8; 48],
+    envelope: &AttestedKeyEnvelope,
+    out_secret: &mut [u8; 32],
+) -> Result<(), AttestedEnvelopeError> {
+    if envelope.key_len != 32 {
+        return Err(AttestedEnvelopeError::InvalidLength);
+    }
+    if ct_eq_32_bytes(&envelope.challenge_nonce, expected_nonce) != 1 {
+        return Err(AttestedEnvelopeError::NonceMismatch);
+    }
+    let pcr_ok = ct_eq_48_bytes(&envelope.pcr0, expected_pcr0)
+        & ct_eq_48_bytes(&envelope.pcr1, expected_pcr1)
+        & ct_eq_48_bytes(&envelope.pcr2, expected_pcr2);
+    if pcr_ok != 1 {
+        return Err(AttestedEnvelopeError::PcrMismatch);
+    }
+
+    let priv_scalar = unsafe { Scalar::from_bytes_le(ephemeral_privkey.as_ptr()) };
+    if priv_scalar.is_zero() || !priv_scalar.is_canonical() {
+        return Err(AttestedEnvelopeError::InvalidRecipientKey);
+    }
+    let sender_pt =
+        crate::psi::ProjectivePoint::from_compressed_sec1(&envelope.sender_ephemeral_pubkey)
+            .ok_or(AttestedEnvelopeError::InvalidSenderKey)?;
+
+    let shared_pt = sender_pt.scalar_mul(&priv_scalar);
+    if shared_pt.is_infinity() {
+        return Err(AttestedEnvelopeError::InvalidSenderKey);
+    }
+    let shared_x_fe = shared_pt.to_affine_x();
+    let mut shared_x = [0u8; 32];
+    unsafe { shared_x_fe.to_bytes_le(shared_x.as_mut_ptr()) };
+
+    let mut enc_key = [0u8; 32];
+    let mut mac_key = [0u8; 32];
+    derive_attested_recipient_keys(
+        &shared_x,
+        recipient_pubkey,
+        &envelope.sender_ephemeral_pubkey,
+        &mut enc_key,
+        &mut mac_key,
+    );
+    ct_zeroize(&mut shared_x);
+
+    let expected_tag = compute_attested_envelope_tag(&mac_key, recipient_pubkey, envelope);
+    ct_zeroize(&mut mac_key);
+
+    if ct_eq_16_bytes(&expected_tag, &envelope.auth_tag) != 1 {
+        ct_zeroize(&mut enc_key);
+        return Err(AttestedEnvelopeError::AuthenticationFailed);
+    }
+
+    let mut candidate = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        candidate[i] = envelope.wrapped_key[i] ^ enc_key[i];
+        i += 1;
+    }
+    ct_zeroize(&mut enc_key);
+
+    let unwrapped_scalar = unsafe { Scalar::from_bytes_le(candidate.as_ptr()) };
+    if unwrapped_scalar.is_zero() || !unwrapped_scalar.is_canonical() {
+        ct_zeroize(&mut candidate);
+        return Err(AttestedEnvelopeError::InvalidUnwrappedScalar);
+    }
+
+    out_secret.copy_from_slice(&candidate);
+    ct_zeroize(&mut candidate);
+    Ok(())
+}
+
+/// Authenticates and unwraps an `AttestedKeyEnvelope` inside the enclave and
+/// unconditionally zeroizes `ephemeral_privkey` via `write_volatile` + `SeqCst` before returning.
+#[cfg(not(verus))]
+#[inline(never)]
+pub fn unwrap_attested_recipient_envelope(
+    ephemeral_privkey: &mut [u8; 32],
+    recipient_pubkey: &[u8; 33],
+    expected_nonce: &[u8; 32],
+    expected_pcr0: &[u8; 48],
+    expected_pcr1: &[u8; 48],
+    expected_pcr2: &[u8; 48],
+    envelope: &AttestedKeyEnvelope,
+    out_secret: &mut [u8; 32],
+) -> Result<(), AttestedEnvelopeError> {
+    let res = unwrap_attested_recipient_envelope_inner(
+        ephemeral_privkey,
+        recipient_pubkey,
+        expected_nonce,
+        expected_pcr0,
+        expected_pcr1,
+        expected_pcr2,
+        envelope,
+        out_secret,
+    );
+
+    // Unconditionally destroy ephemeral private key immediately upon unwrap completion or error
+    ct_zeroize(ephemeral_privkey);
+    compiler_fence(Ordering::SeqCst);
+
+    if res.is_err() {
+        ct_zeroize(out_secret);
+        compiler_fence(Ordering::SeqCst);
+    }
+    res
+}
