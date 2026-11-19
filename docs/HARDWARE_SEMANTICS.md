@@ -1,6 +1,6 @@
 # Nona Core Engine: Silicon Semantic Gap Analysis
 
-**Specification Version:** 1.0.2-HARDENING  
+**Specification Version:** 1.1.0-HARDENING  
 **Classification:** Microarchitectural Memory Consistency, Speculation & Compiler Semantics Audit  
 **Target Architectures:** `x86_64` (AWS Nitro Intel Xeon / AMD EPYC) | `aarch64` (AWS Graviton3 Neoverse V1 / Apple Silicon)  
 

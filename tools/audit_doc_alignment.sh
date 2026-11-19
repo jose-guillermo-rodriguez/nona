@@ -119,13 +119,13 @@ for rel in ("manifests/enclave_manifest_x86_64.json", "manifests/enclave_manifes
             print(f"  [!] FAIL: {rel} has invalid SHA-384 digest for {pcr}: {val!r}", file=sys.stderr)
             sys.exit(1)
 PYEOF
-if [ "$CRATE_VERSION" = "1.0.2" ]; then
-    if ! grep -q '^## \[1.0.2\]' CHANGELOG.md; then
-        echo "  [!] FAIL: CHANGELOG.md missing [1.0.2] release entry." >&2
+if [ "$CRATE_VERSION" = "1.1.0" ]; then
+    if ! grep -q '^## \[1.1.0\]' CHANGELOG.md; then
+        echo "  [!] FAIL: CHANGELOG.md missing [1.1.0] release entry." >&2
         exit 1
     fi
-    if ! grep -q '"version": "1.0.2"' nona-core.cdx.json; then
-        echo "  [!] FAIL: nona-core.cdx.json SBOM root component must reflect 1.0.2." >&2
+    if ! grep -q '"version": "1.1.0"' nona-core.cdx.json; then
+        echo "  [!] FAIL: nona-core.cdx.json SBOM root component must reflect 1.1.0." >&2
         exit 1
     fi
 fi

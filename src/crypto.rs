@@ -1844,6 +1844,30 @@ fn compute_attested_envelope_tag(
 }
 
 #[cfg(not(verus))]
+#[inline(never)]
+fn derive_secp256k1_compressed_pubkey(scalar: &Scalar) -> Option<[u8; 33]> {
+    if scalar.is_zero() || !scalar.is_canonical() {
+        return None;
+    }
+    let g = crate::psi::ProjectivePoint::generator();
+    let q = g.scalar_mul(scalar);
+    if q.is_infinity() {
+        return None;
+    }
+    let z_inv = q.z.invert();
+    let affine_x = q.x.mul(&z_inv);
+    let mut x_be = [0u8; 32];
+    unsafe { affine_x.to_bytes_le(x_be.as_mut_ptr()) };
+    x_be.reverse();
+
+    let affine_y = q.y.mul(&z_inv);
+    let mut pubkey = [0u8; 33];
+    pubkey[0] = if (affine_y.limbs[0] & 1) == 1 { 0x03 } else { 0x02 };
+    pubkey[1..33].copy_from_slice(&x_be);
+    Some(pubkey)
+}
+
+#[cfg(not(verus))]
 impl AttestedKeyEnvelope {
     #[inline(never)]
     pub fn to_wire_bytes(&self) -> [u8; ATTESTED_ENVELOPE_WIRE_SIZE] {
@@ -1931,14 +1955,8 @@ impl AttestedKeyEnvelope {
         let recipient_pt = crate::psi::ProjectivePoint::from_compressed_sec1(recipient_pubkey)
             .ok_or(AttestedEnvelopeError::InvalidRecipientKey)?;
 
-        let mut sender_pubkey = [0u8; 33];
-        if crate::attestation::derive_compressed_public_key(
-            sender_ephemeral_privkey,
-            &mut sender_pubkey,
-        ) != 0
-        {
-            return Err(AttestedEnvelopeError::InvalidSenderKey);
-        }
+        let sender_pubkey = derive_secp256k1_compressed_pubkey(&sender_scalar)
+            .ok_or(AttestedEnvelopeError::InvalidSenderKey)?;
 
         let shared_pt = recipient_pt.scalar_mul(&sender_scalar);
         if shared_pt.is_infinity() {

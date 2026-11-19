@@ -8,7 +8,7 @@
 
 The core engine (`libnona_core`) is a zero-dependency, `#![no_std]` high-assurance C-ABI primitive engineered for Private Set Intersection (PSI), vectorized database UDF acceleration, deterministic byte normalization, and constant-time index obfuscation. Supporting developer CLI utilities, NSM drivers, and test harnesses utilize pinned, offline-vendored dependencies. Designed as a foundational primitive for institutional and confidential computing environments, Nona guarantees compile-time memory safety via **291 machine-checked Verus SMT targets (103 ghost lemmas + 188 verified executive, boundary & reduction obligations)** and total absence of runtime dynamic heap allocation (`malloc`/`free`/`realloc`/`calloc`) strictly for `#![no_std]` targets compiled under `--no-default-features`.
 
-> **Release Provenance:** Public open-source release v1.0.2 (Hardening Pass 1 on the 1.0.0-RELEASE specification), formally verified in Verus (291 SMT targets) and hardware-validated on AWS Nitro Enclaves.
+> **Release Provenance:** Public open-source release v1.1.0 (Track 3 External Cryptanalysis & Security Audit Sealed on the 1.0.0-RELEASE specification), formally verified in Verus (291 SMT targets, 0 arithmetic axioms) and hardware-validated on AWS Nitro Enclaves.
 
 ---
 
@@ -35,6 +35,7 @@ nona/
 │       └── audit.yml                # dudect constant-time & ASan/UBSan memory sanitizers
 ├── docs/
 │   ├── C_ABI.md                     # Darwin/Apple Mach-O static linkage guide
+│   ├── EXTERNAL_AUDIT_DOSSIER.md    # External cryptanalysis & independent security audit briefing
 │   ├── HAVH.md                      # High-Assurance Verification Harness (5-tier certification)
 │   ├── HARDWARE_SEMANTICS.md        # Silicon memory consistency (TSO vs aarch64), DSE & errata audit
 │   ├── KMS_ATTESTATION.md           # AWS Nitro Enclave & KMS Recipient key-release protocol
@@ -118,6 +119,7 @@ nona/
 Nona rejects standard unit-testing pyramids in favor of a 5-tier **High-Assurance Verification Harness (HAVH)** that enforces mathematical truth, machine-level binary constraints, and microarchitectural side-channel resistance. Complete specifications are documented in [`docs/HAVH.md`](docs/HAVH.md).
 
 ### Security Architecture & Governance
+- **External Cryptanalysis & Audit Dossier:** [`docs/EXTERNAL_AUDIT_DOSSIER.md`](docs/EXTERNAL_AUDIT_DOSSIER.md) (`make audit-bundle`)
 - **Canonical Assurance Specification:** [`docs/HAVH.md`](docs/HAVH.md)
 - **Threat Model & Adversary Boundaries (STPA/PASTA):** [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 - **Silicon Semantic Gap Analysis (TSO vs. aarch64):** [`docs/HARDWARE_SEMANTICS.md`](docs/HARDWARE_SEMANTICS.md)

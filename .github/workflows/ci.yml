@@ -306,7 +306,7 @@ jobs:
         run: |
           echo "[CI] Building fuzz_ingest, fuzz_wire_dispatch, fuzz_c_abi_ffi, and fuzz_kms_envelope..."
           RUSTFLAGS="-Z sanitizer=address -C passes=sancov-module -C llvm-args=-sanitizer-coverage-level=4 -C llvm-args=-sanitizer-coverage-inline-8bit-counters -C llvm-args=-sanitizer-coverage-pc-table" \
-            cargo build --frozen --bins --features std --target x86_64-unknown-linux-gnu
+            cargo +nightly build --frozen --bins --features std --target x86_64-unknown-linux-gnu
 
       - name: Execute Bounded Continuous Fuzzing Suite (-runs=500 -max_len=4096)
         run: |
