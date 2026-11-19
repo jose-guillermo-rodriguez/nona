@@ -304,6 +304,28 @@ if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' tools/audit_assembly_ct_and_zeroize.p
 fi
 python3 tools/audit_assembly_ct_and_zeroize.py --self-test && python3 tools/audit_assembly_ct_and_zeroize.py
 echo "  ✓ Oblivious Phase 2 compaction, hard timing gate, DSE zeroization, and assembly spill audit verified."
+echo "--> Check 19: Enforcing cryptographic reduction proofs and Verus specification mutation testing (spec-fuzzing)..."
+if [ ! -f "proofs/crypto_reductions.rs" ]; then
+    echo "  [!] FAIL: Missing formal cryptographic reduction proof module: proofs/crypto_reductions.rs"
+    exit 1
+fi
+if grep -qE '#\[verifier::external_body\]|\bassume\s*\(|\badmit\s*\(' proofs/crypto_reductions.rs; then
+    echo "  [!] FAIL: proofs/crypto_reductions.rs must be 100% axiom-free (no external_body, assume, or admit)."
+    exit 1
+fi
+if ! grep -q "proofs/crypto_reductions.rs" tools/run_verus_safe.sh; then
+    echo "  [!] FAIL: proofs/crypto_reductions.rs is not wired into tools/run_verus_safe.sh."
+    exit 1
+fi
+if [ ! -x "tools/fuzz_verus_specs.py" ]; then
+    echo "  [!] FAIL: Missing executable Verus specification mutation fuzzer: tools/fuzz_verus_specs.py"
+    exit 1
+fi
+if ! grep -qE '^spec-fuzz:' Makefile || ! grep -E '^host:' Makefile | grep -qw 'spec-fuzz'; then
+    echo "  [!] FAIL: Makefile must define 'spec-fuzz:' and include it in 'host:'."
+    exit 1
+fi
+echo "  ✓ Cryptographic security reductions and Verus specification mutation fuzzer verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
 echo "=========================================================="
