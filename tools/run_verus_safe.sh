@@ -198,6 +198,7 @@ else
         "src/allocator.rs"
         "src/crypto.rs"
         "src/enclave_boundaries.rs"
+        "proofs/crypto_reductions.rs"
     )
 
     TOTAL_TARGETS=${#TARGETS[@]}

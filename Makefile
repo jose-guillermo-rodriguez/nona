@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: help all host verify-models test nostd lint formal formal-container gates linkage sanitizers assembly-audit bench container stack-container enclave container-all clean
+.PHONY: help all host verify-models test nostd lint formal spec-fuzz formal-container gates linkage sanitizers assembly-audit bench container stack-container enclave container-all clean
 
 # Dynamic Container Engine Resolution (Podman > Docker)
 CONTAINER_BIN ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null || echo "")
@@ -75,7 +75,11 @@ verify-models:
 
 formal:
 	@echo "[HOST] Running live Verus SMT formal verification proofs (fail-closed)..."
-	@./tools/run_verus_safe.sh
+	@./tools/run_verus_safe.sh --native-host
+
+spec-fuzz:
+	@echo "[HOST] Running Verus specification mutation fuzzer (fail-closed 100% kill gate)..."
+	python3 tools/fuzz_verus_specs.py
 
 gates:
 	@echo "[HOST] Executing mechanical runtime gates 1-5..."
@@ -97,7 +101,7 @@ bench:
 	@echo "[HOST] Executing engine performance microbenchmarks..."
 	cargo bench --features std
 
-host: verify-models nostd sbom lint formal test gates linkage sanitizers assembly-audit
+host: verify-models nostd sbom lint formal spec-fuzz test gates linkage sanitizers assembly-audit
 	@echo "======================================================================"
 	@echo " [✓] ALL HOST / NATIVE QA TARGETS PASSED CLEANLY"
 	@echo "======================================================================"
