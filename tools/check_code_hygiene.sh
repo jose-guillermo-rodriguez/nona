@@ -373,6 +373,10 @@ if ! grep -q 'fuzz_c_abi_ffi' .github/workflows/ci.yml || ! grep -q 'fuzz_kms_en
     echo "  [!] FAIL: .github/workflows/ci.yml must execute the continuous fuzzing suite across all 4 fuzz targets."
     exit 1
 fi
+if grep -q 'NONA_FLAG_PSI_SUM' fuzz/fuzz_targets/fuzz_c_abi_ffi.rs; then
+    echo "  [!] FAIL: fuzz/fuzz_targets/fuzz_c_abi_ffi.rs must not invoke /dev/nsm-dependent NONA_FLAG_PSI_SUM in-process on non-Nitro CI runners."
+    exit 1
+fi
 echo "  ✓ Continuous libFuzzer targets and CI regression harness verified."
 echo "--> Check 22: Enforcing external cryptanalysis readiness dossier & reproducible audit bundle..."
 if [ ! -f "docs/EXTERNAL_AUDIT_DOSSIER.md" ]; then
