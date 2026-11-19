@@ -47,6 +47,11 @@ if [ "$CODE_EXTERNAL_COUNT" -gt "$MAX_EXTERNAL_AXIOMS" ]; then
 fi
 grep -rnE "(external_body|axiom|unverified perimeter)" docs/TCB.md SPECIFICATION.md || true
 
+if grep -rnE '#\[verifier::external_body\]' src/psi.rs >/dev/null 2>&1; then
+    echo "  [!] FAIL: src/psi.rs still contains #[verifier::external_body] arithmetic axioms (must be 0; only 3 OS/hardware boundaries in src/enclave_boundaries.rs permitted)." >&2
+    exit 1
+fi
+
 echo ""
 echo "[AUDIT 4] Checking feature flag consistency ('host-defense')..."
 grep -rn "host-defense" docs/ SPECIFICATION.md || echo "  [!] Warning: 'host-defense' not explicitly documented in docs/ or SPECIFICATION.md."

@@ -1,11 +1,6 @@
-====================================================================
-NONA CORE ENGINE: HERMETIC FORMAL SMT VERIFICATION
-Container Engine: /Volumes/Resonance/.bin/podman | Image: nona-verus-verifier:latest
-Platform:         linux/amd64 (glibc 2.39 / libstdc++ 3.4.32)
-====================================================================
 === NONA CORE ENGINE: FORMAL VERIFICATION SUITE ===
 [1/6] Verifying src/psi.rs...
-verification results:: 93 verified, 0 errors
+verification results:: 176 verified, 0 errors
 [2/6] Verifying src/normalization.rs...
 verification results:: 9 verified, 0 errors
 [3/6] Verifying src/obfuscation.rs...
@@ -16,4 +11,4 @@ verification results:: 2 verified, 0 errors
 verification results:: 3 verified, 0 errors
 [6/6] Verifying src/enclave_boundaries.rs...
 verification results:: 17 verified, 0 errors
-[===] 100% CORE ALGEBRAIC & INVARIANT TARGETS VERIFIED: 146/146 SMT TARGETS SEALED (0 ERRORS) [===]
+[===] 100% CORE ALGEBRAIC & INVARIANT TARGETS VERIFIED: 229/229 SMT TARGETS SEALED (0 ERRORS) [===]

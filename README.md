@@ -1,20 +1,20 @@
 # NONA Core Engine: Formally Verified Cryptographic Engine
 
 [![Build Status](https://img.shields.io/badge/Build-Hermetic_Musl_PASS-brightgreen)](#5-reproducible-builds--hermetic-packaging)
-[![Formal Proofs](https://img.shields.io/badge/Verus-146_Verified_0_Errors-blue)](#4-formal-smt-verification-matrix)
+[![Formal Proofs](https://img.shields.io/badge/Verus-229_Verified_0_Errors-blue)](#4-formal-smt-verification-matrix)
 [![Assurance](https://img.shields.io/badge/Assurance-HAVH_5--Tier_Certified-success)](docs/HAVH.md)
 [![Zero-Heap](https://img.shields.io/badge/Substrate-%23![no_std]_Zero--Heap-orange)](#1-architectural-invariants)
 [![TEE Platform](https://img.shields.io/badge/Enclave-AWS_Nitro_Enclaves-blueviolet)](#6-aws-nitro-enclave-deployment)
 
-The core engine (`libnona_core`) is a zero-dependency, `#![no_std]` high-assurance C-ABI primitive engineered for Private Set Intersection (PSI), vectorized database UDF acceleration, deterministic byte normalization, and constant-time index obfuscation. Supporting developer CLI utilities, NSM drivers, and test harnesses utilize pinned, offline-vendored dependencies. Designed as a foundational primitive for institutional and confidential computing environments, Nona guarantees compile-time memory safety via **146 machine-checked Verus SMT targets (50 ghost lemmas + 96 verified executive & boundary contracts)** and total absence of runtime dynamic heap allocation (`malloc`/`free`/`realloc`/`calloc`) strictly for `#![no_std]` targets compiled under `--no-default-features`.
+The core engine (`libnona_core`) is a zero-dependency, `#![no_std]` high-assurance C-ABI primitive engineered for Private Set Intersection (PSI), vectorized database UDF acceleration, deterministic byte normalization, and constant-time index obfuscation. Supporting developer CLI utilities, NSM drivers, and test harnesses utilize pinned, offline-vendored dependencies. Designed as a foundational primitive for institutional and confidential computing environments, Nona guarantees compile-time memory safety via **229 machine-checked Verus SMT targets (80 ghost lemmas + 149 verified executive & boundary contracts)** and total absence of runtime dynamic heap allocation (`malloc`/`free`/`realloc`/`calloc`) strictly for `#![no_std]` targets compiled under `--no-default-features`.
 
-> **Release Provenance:** Public open-source release v1.0.2 (Hardening Pass 1 on the 1.0.0-RELEASE specification), formally verified in Verus (146 SMT targets) and hardware-validated on AWS Nitro Enclaves.
+> **Release Provenance:** Public open-source release v1.0.2 (Hardening Pass 1 on the 1.0.0-RELEASE specification), formally verified in Verus (229 SMT targets) and hardware-validated on AWS Nitro Enclaves.
 
 ---
 
 ## 1. Architectural Invariants
 
-- **Machine-Checked SMT Verification:** 146 formal Verus theorems verify arithmetic boundary safety, Solinas modular reduction, inductive loop invariants of the scalar multiplication ladder, Feistel structural invertibility (proving round-trip bijectivity without asserting PRF diffusion or recovery resistance), and array indexing across core cryptographic modules. Production secp256k1 projective point addition (RCB 2016 Alg 4) and 256-bit scalar multiplication are machine-checked in Verus.
+- **Machine-Checked SMT Verification:** 229 formal Verus theorems verify arithmetic boundary safety, Solinas modular reduction, inductive loop invariants of the scalar multiplication ladder, Feistel structural invertibility (proving round-trip bijectivity without asserting PRF diffusion or recovery resistance), and array indexing across core cryptographic modules. Production secp256k1 projective point addition (RCB 2016 Alg 4) and 256-bit scalar multiplication are machine-checked in Verus.
 - **Zero Dynamic Heap Allocation:** Pure stack-allocated and static-memory architecture. Exactly 0 calls to `malloc`, `free`, `realloc`, or `calloc` in compiled release binaries, statically enforced by `nm -u` dynamic symbol audits. Zero dynamic allocation guarantees apply strictly to `#![no_std]` targets built with `--no-default-features`.
 - **L1 Cache Line Alignment:** All context frames, scratchpads, and cryptographic structures are strictly 64-byte aligned (`#[repr(C, align(64))]`) to eliminate false sharing and maximize SIMD throughput (AVX-512 / ARM Neon).
 - **Constant-Time Microarchitectural Invariance:** Multi-precision finite field arithmetic utilizes unrolled hardware carry and borrow chains (inline x86_64 `add`/`adc` and `sub`/`sbb` assembly) and branchless conditional selection (`ct_cmov`) paired with `SeqCst` compiler memory fences. Timing neutrality is continuously evaluated via `dudect` empirical statistical regression smoke tests (|t| < 4.5 under Welch's t-test over 100,000 interleaved samples; current release measures |t| = 0.58). Dudect serves as an empirical regression test rather than formal verification of microarchitectural side-channel resistance.
@@ -73,7 +73,7 @@ nona/
 │   ├── enclave_manifest_aarch64.json         # Sealed AWS Nitro aarch64 image measurements
 │   └── enclave_manifest_x86_64.json          # Sealed AWS Nitro x86_64 image measurements
 ├── proofs/
-│   └── verus_verification.log       # Audit evidence: 146/146 SMT verification log
+│   └── verus_verification.log       # Audit evidence: 229/229 SMT verification log
 ├── specs/
 │   ├── vsock_session.cfg            # TLC model-checker configuration & invariant bindings
 │   └── vsock_session.tla            # Exhaustive TLA+ AF_VSOCK session & adversarial channel model
@@ -122,7 +122,7 @@ Nona rejects standard unit-testing pyramids in favor of a 5-tier **High-Assuranc
 - **Supply-Chain Provenance:** CycloneDX v1.5 JSON SBOM (`make sbom` / `nona-core.cdx.json`)
 
 ### Host Verification (Zero Container Overhead)
-Executes all formal SMT proofs (146/146), pure `#![no_std]` compilation, code hygiene, Rust test matrices, mechanical gates 1–5, static zero-heap linkage audits, and dynamic memory sanitizers (UBSan & ASan):
+Executes all formal SMT proofs (229/229), pure `#![no_std]` compilation, code hygiene, Rust test matrices, mechanical gates 1–5, static zero-heap linkage audits, and dynamic memory sanitizers (UBSan & ASan):
 ```bash
 make host
 ```
@@ -147,23 +147,23 @@ All mathematical models and SMT theorems are machine-checked using Verus and Z3 
 
 | Source Module | Target Domain | Theorems | Verified Status |
 | :--- | :--- | :--- | :--- |
-| `src/psi.rs` | Solinas reduction, complete homogeneous projective $\mathbb{P}^2$ point addition (RCB 2016 Alg 4 complete addition), and 256-bit scalar multiplication ladder on secp256k1 | 93 | 100% Passed (0 Errors) |
+| `src/psi.rs` | Zero-axiom 256-bit Solinas modular multiplication, multi-limb carry/borrow chains, complete homogeneous projective $\mathbb{P}^2$ point addition (RCB 2016 Alg 4), 256-bit scalar multiplication ladder, and Tier 3 algebraic/boundary invariants | 176 | 100% Passed (0 Errors) |
 | `src/normalization.rs` | Monomorphic 64-byte bounded normalization & output sanitization completeness | 9 | 100% Passed (0 Errors) |
 | `src/obfuscation.rs` | 4-round Feistel bijection & non-identity guarantees | 22 | 100% Passed (0 Errors) |
 | `src/allocator.rs` | Pointer alignment preservation & static boundary safety | 2 | 100% Passed (0 Errors) |
 | `src/crypto.rs` | Ghost ChannelTokens & adaptive threshold routing circuit | 3 | 100% Passed (0 Errors) |
 | `src/enclave_boundaries.rs` | Hardware `/dev/nsm` IOCTL/CBOR ABI, session op ceiling, vsock wire framing, FFI disjointness & ring/exception boundaries | 17 | 100% Passed (0 Errors) |
-| **Total** | **Nona Core Verified Surface (50 Lemmas + 96 Contracts)** | **146** | **146 Verified (0 Errors)** |
+| **Total** | **Nona Core Verified Surface (80 Lemmas + 149 Contracts)** | **229** | **229 Verified (0 Errors)** |
 
 ### Formal Verification Surface
 
 Nona guarantees core cryptographic and state invariants through machine-checked verification via [Verus](https://github.com/verus-lang/verus) and the Z3 SMT solver:
 
-- **146 Sealed SMT Verification Targets (0 Errors):** Partitioned into **50 compile-time ghost lemmas** (`proof fn` mathematical inductive steps) and **96 verified executive & boundary contracts** (runtime `fn` with machine-checked `requires`/`ensures` contracts) across finite field arithmetic, complete projective point addition, constant-time scalar multiplication loops, 64-bit Feistel permutation networks, static arena memory alignment, and monotonic cryptographic channel tokens.
+- **229 Sealed SMT Verification Targets (0 Errors):** Partitioned into **80 compile-time ghost lemmas** (`proof fn` mathematical inductive steps) and **149 verified executive & boundary contracts** (runtime `fn` with machine-checked `requires`/`ensures` contracts) across finite field arithmetic, complete projective point addition, constant-time scalar multiplication loops, 64-bit Feistel permutation networks, static arena memory alignment, and monotonic cryptographic channel tokens.
 - **Feistel Structural Invertibility:** The 4-round index permutation circuit (`src/obfuscation.rs`) is formally proven to be an exact mathematical bijection ($f^{-1}(f(x)) = x$), strictly collision-free (injective), and covering the entire 64-bit domain (surjective). Machine-checked theorems establish structural invertibility only; they do not guarantee cryptographic pseudorandom function (PRF) diffusion, statistical avalanche, or resistance against algebraic cryptanalysis.
 - **Montgomery Ladder Correctness:** Constant-time 256-bit scalar multiplication ladder (`ProjectivePoint::scalar_mul`) and ladder loop invariants are formally verified inductively in Verus without raw `assume` directives. Production secp256k1 projective point addition (RCB 2016 Alg 4 complete addition) and doubling are machine-checked in the algebraic core.
 - **Deterministic 64-Byte Alignment:** Arena bump allocation (`bump_allocate`) machine-proves that every offset satisfies `offset % 64 == 0`, eliminating AVX-512 misaligned load faults at the type level.
-- **Bounded TCB:** Non-linear degree-2 multivariate field reduction ($512 \to 256$ bit) is isolated behind 7 audited `#[verifier::external_body]` sites (4 arithmetic primitives in `src/psi.rs` and 3 hardware/OS syscall boundary models in `src/enclave_boundaries.rs`), fully documented in `SPECIFICATION.md §4.5.1`. Runtime SIMD acceleration, Simplified SWU hash-to-curve (RFC 9380), batch inversion, point decompression, and C-ABI FFI entry points are part of the unverified runtime perimeter, validated through differential fuzzing and integration test suites.
+- **Minimal 3-Site TCB (Zero Arithmetic Axioms):** All 4 arithmetic primitives in `src/psi.rs` (`FieldElement::mul`, `add_nocarry`, `sub_noborrow`, `lemma_multi_limb_bit_to_nat`) are fully machine-checked in Verus (`0` `#[verifier::external_body]` axioms in `src/psi.rs`). The live TCB is reduced strictly to 3 irreducible OS/hardware syscall boundary models in `src/enclave_boundaries.rs`, fully documented in `SPECIFICATION.md §4.5.1`. Runtime SIMD intrinsics, end-to-end SWU/batch-inversion loops, affine square-root decompression, and raw-pointer C-ABI entry points operate in the runtime perimeter, validated through differential fuzzing and integration test suites.
 
 ---
 
