@@ -30,6 +30,7 @@ REQUIRED_GATES = (
     "require_assembly_spill_audit",
     "require_kms_recipient_binding",
     "require_spec_fuzzing",
+    "require_continuous_fuzzing",
 )
 
 RUNTIME_ABI_EXCLUSIONS = {
@@ -74,7 +75,7 @@ def validate_policy_schema(doc: object, label: str, *, is_baseline: bool = False
         fail(f"{label}.gates must be a JSON object.")
 
     required_gates = (
-        tuple(g for g in REQUIRED_GATES if g != "require_spec_fuzzing")
+        tuple(g for g in REQUIRED_GATES if g not in ("require_spec_fuzzing", "require_continuous_fuzzing"))
         if is_baseline
         else REQUIRED_GATES
     )
@@ -440,6 +441,16 @@ def verify_introspection_and_gates(policy: dict) -> None:
         if not re.search(r"^spec-fuzz:", makefile_text, re.M):
             fail("gates.require_spec_fuzzing is true, but Makefile lacks 'spec-fuzz:' target.")
         print("  ✓ Stage gate active: Verus specification mutation fuzzer enforced.")
+
+    # 5. Continuous fuzzing CI gate
+    if gates["require_continuous_fuzzing"]:
+        fuzz_toml = Path("fuzz/Cargo.toml")
+        if not fuzz_toml.is_file():
+            fail("gates.require_continuous_fuzzing is true, but fuzz/Cargo.toml is missing.")
+        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8") if Path(".github/workflows/ci.yml").is_file() else ""
+        if "fuzz" not in ci_text.lower():
+            fail("gates.require_continuous_fuzzing is true, but .github/workflows/ci.yml lacks continuous fuzzing step.")
+        print("  ✓ Stage gate active: continuous fuzzing CI harness enforced.")
 
 def main() -> None:
     policy_path = Path("assurance_policy.json")

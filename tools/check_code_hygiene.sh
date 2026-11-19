@@ -326,6 +326,54 @@ if ! grep -qE '^spec-fuzz:' Makefile || ! grep -E '^host:' Makefile | grep -qw '
     exit 1
 fi
 echo "  ✓ Cryptographic security reductions and Verus specification mutation fuzzer verified."
+echo "--> Check 20: Enforcing attested KMS recipient key-release binding & integration suite..."
+if [ ! -f "docs/KMS_ATTESTATION.md" ]; then
+    echo "  [!] FAIL: Missing KMS cryptographic attestation architecture spec: docs/KMS_ATTESTATION.md"
+    exit 1
+fi
+for pattern in "Recipient" "PCR0" "NSM" "zeroize"; do
+    if ! grep -qiE "$pattern" docs/KMS_ATTESTATION.md; then
+        echo "  [!] FAIL: docs/KMS_ATTESTATION.md missing required attestation binding coverage: $pattern"
+        exit 1
+    fi
+done
+if [ ! -f "tests/integration/test_kms_recipient_binding.rs" ]; then
+    echo "  [!] FAIL: Missing KMS recipient binding integration test suite: tests/integration/test_kms_recipient_binding.rs"
+    exit 1
+fi
+if ! grep -q 'name = "test_kms_recipient_binding"' Cargo.toml; then
+    echo "  [!] FAIL: Cargo.toml must register [[test]] target 'test_kms_recipient_binding'."
+    exit 1
+fi
+if ! grep -rnE 'Recipient|CiphertextForRecipient|AttestedKeyEnvelope|attested_recipient' src/enclave_server.rs src/crypto.rs src/bin/nona_enclave.rs >/dev/null 2>&1; then
+    echo "  [!] FAIL: Enclave runtime missing attested KMS recipient key-release binding primitives."
+    exit 1
+fi
+if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' docs/KMS_ATTESTATION.md tests/integration/test_kms_recipient_binding.rs src/enclave_server.rs src/crypto.rs src/bin/nona_enclave.rs 2>/dev/null; then
+    echo "  [!] FAIL: Internal tracking codes detected in KMS recipient binding files."
+    exit 1
+fi
+echo "  ✓ Attested KMS recipient key-release binding and test registration verified."
+echo "--> Check 21: Enforcing continuous cargo-fuzz / libFuzzer targets & CI regression harness..."
+for target in fuzz_ingest fuzz_wire_dispatch fuzz_c_abi_ffi fuzz_kms_envelope; do
+    if [ ! -f "fuzz/fuzz_targets/${target}.rs" ]; then
+        echo "  [!] FAIL: Missing required libFuzzer target: fuzz/fuzz_targets/${target}.rs"
+        exit 1
+    fi
+    if ! grep -q "name = \"${target}\"" fuzz/Cargo.toml; then
+        echo "  [!] FAIL: fuzz/Cargo.toml missing [[bin]] entry for ${target}."
+        exit 1
+    fi
+done
+if ! grep -qE '^fuzz-smoke:' Makefile; then
+    echo "  [!] FAIL: Makefile must define 'fuzz-smoke:' target."
+    exit 1
+fi
+if ! grep -q 'fuzz_c_abi_ffi' .github/workflows/ci.yml || ! grep -q 'fuzz_kms_envelope' .github/workflows/ci.yml; then
+    echo "  [!] FAIL: .github/workflows/ci.yml must execute the continuous fuzzing suite across all 4 fuzz targets."
+    exit 1
+fi
+echo "  ✓ Continuous libFuzzer targets and CI regression harness verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"
 echo "=========================================================="

@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
-.PHONY: help all host verify-models test nostd lint formal spec-fuzz formal-container gates linkage sanitizers assembly-audit bench container stack-container enclave container-all clean
+.PHONY: help all host verify-models test nostd lint formal spec-fuzz fuzz-smoke formal-container gates linkage sanitizers assembly-audit bench container stack-container enclave container-all clean
 
 # Dynamic Container Engine Resolution (Podman > Docker)
 CONTAINER_BIN ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null || echo "")
@@ -81,6 +81,25 @@ spec-fuzz:
 	@echo "[HOST] Running Verus specification mutation fuzzer (fail-closed 100% kill gate)..."
 	python3 tools/fuzz_verus_specs.py
 
+fuzz-smoke:
+	@echo "[HOST] Compiling all 4 continuous fuzz targets (fuzz_ingest, fuzz_wire_dispatch, fuzz_c_abi_ffi, fuzz_kms_envelope)..."
+	cargo build --bins --features std
+	@HOST_TRIPLE=$$(rustc -vV | awk '/^host:/ {print $$2}'); \
+	if cargo +nightly --version >/dev/null 2>&1; then \
+		echo "[HOST] Executing bounded ASan+SanCov continuous fuzzing smoke pass on $$HOST_TRIPLE (-runs=256 -max_len=4096)..."; \
+		RUSTFLAGS="-Z sanitizer=address -C passes=sancov-module -C llvm-args=-sanitizer-coverage-level=4 -C llvm-args=-sanitizer-coverage-inline-8bit-counters -C llvm-args=-sanitizer-coverage-pc-table" \
+			cargo +nightly build --bins --features std --target "$$HOST_TRIPLE" --target-dir target/fuzz-nightly; \
+		for target in fuzz_ingest fuzz_wire_dispatch fuzz_c_abi_ffi fuzz_kms_envelope; do \
+			"./target/fuzz-nightly/$$HOST_TRIPLE/debug/$$target" -runs=256 -max_len=4096; \
+		done; \
+	else \
+		echo "[HOST] Executing deterministic bounded fuzzing smoke pass (-runs=256 -max_len=4096) + perimeter & KMS integration suites..."; \
+		for target in fuzz_ingest fuzz_wire_dispatch fuzz_c_abi_ffi fuzz_kms_envelope; do \
+			./target/debug/$$target -runs=256 -max_len=4096; \
+		done; \
+		cargo test --test test_kms_recipient_binding --test test_vsock_perimeter_bounds --features std; \
+	fi
+
 gates:
 	@echo "[HOST] Executing mechanical runtime gates 1-5..."
 	./tools/run_mechanical_gates.sh
@@ -101,7 +120,7 @@ bench:
 	@echo "[HOST] Executing engine performance microbenchmarks..."
 	cargo bench --features std
 
-host: verify-models nostd sbom lint formal spec-fuzz test gates linkage sanitizers assembly-audit
+host: verify-models nostd sbom lint formal spec-fuzz fuzz-smoke test gates linkage sanitizers assembly-audit
 	@echo "======================================================================"
 	@echo " [✓] ALL HOST / NATIVE QA TARGETS PASSED CLEANLY"
 	@echo "======================================================================"

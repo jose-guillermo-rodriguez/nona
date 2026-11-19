@@ -54,7 +54,19 @@ pub extern "C" fn LLVMFuzzerTestOneInput(data: *const u8, size: usize) -> i32 {
     0
 }
 
+fn parse_runs_arg(default_runs: usize) -> usize {
+    for arg in std::env::args().skip(1) {
+        if let Some(val) = arg.strip_prefix("-runs=") {
+            if let Ok(parsed) = val.parse::<usize>() {
+                return parsed.max(1);
+            }
+        }
+    }
+    default_runs
+}
+
 fn main() {
+    let cycles = parse_runs_arg(100_000);
     println!("[*] Launching Wire Dispatch Mutational Fuzzing (100,000 cycles)...");
 
     let mut state: u64 = 0x853c49e6748fea9b;
@@ -66,7 +78,7 @@ fn main() {
     };
 
     let mut corpus = vec![0u8; 4096];
-    for cycle in 1..=100_000 {
+    for cycle in 1..=cycles {
         let size = (usize::try_from(next_u64()).unwrap_or(0) % corpus.len()).max(32);
         for chunk in corpus[..size].chunks_mut(8) {
             let rnd = next_u64().to_le_bytes();
@@ -78,9 +90,9 @@ fn main() {
 
         if cycle % 25_000 == 0 {
             println!(
-                "  [+] Wire dispatch harness completed {cycle} / 100,000 cycles (zero panics)"
+                "  [+] Wire dispatch harness completed {cycle} / {cycles} cycles (zero panics)"
             );
         }
     }
-    println!("[*] Wire Dispatch continuous fuzzing PASSED (100,000/100,000 iterations).");
+    println!("[*] Wire Dispatch continuous fuzzing PASSED ({cycles}/{cycles} iterations).");
 }

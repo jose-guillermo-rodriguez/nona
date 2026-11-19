@@ -778,6 +778,37 @@ impl ProjectivePoint {
         }
     }
 
+    /// Decodes a 33-byte SEC 1 compressed secp256k1 point (`0x02` or `0x03` || big-endian X)
+    /// and validates that `(x, y)` lies strictly on `y^2 = x^3 + 7 (mod p)`.
+    #[inline(never)]
+    pub fn from_compressed_sec1(bytes: &[u8; 33]) -> Option<Self> {
+        let parity = match bytes[0] {
+            0x02 => 0u64,
+            0x03 => 1u64,
+            _ => return None,
+        };
+        let mut x_le = [0u8; 32];
+        x_le.copy_from_slice(&bytes[1..33]);
+        x_le.reverse();
+        let x = unsafe { FieldElement::from_bytes_le(x_le.as_ptr()) };
+        let (borrow, _) = sub_noborrow(&x.limbs, &P);
+        if borrow != 1 {
+            return None;
+        }
+        let b = FieldElement {
+            limbs: [7, 0, 0, 0],
+        };
+        let rhs = x.square().mul(&x).add(&b);
+        let mut y = rhs.sqrt()?;
+        let y_parity = y.limbs[0] & 1;
+        let neg_y = FieldElement::zero().sub(&y);
+        y.ct_cmov(&neg_y, y_parity ^ parity);
+        if !y.square().ct_eq(&rhs) {
+            return None;
+        }
+        Some(Self::from_affine(x, y))
+    }
+
     /// secp256k1 base generator G.
     pub const fn generator() -> Self {
         Self {

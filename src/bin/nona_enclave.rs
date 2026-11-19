@@ -20,6 +20,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         assert!(
             nona_core::enclave_server::MAX_VSOCK_FRAME_BYTES
                 > nona_core::enclave_server::MAX_WIRE_PAYLOAD_BYTES
+                && nona_core::enclave_server::CMD_KMS_RECIPIENT_UNWRAP == 0x0007
         );
     };
     nona_core::enclave_server::harden_enclave_process();
@@ -38,7 +39,7 @@ fn main() {
     const MAX_DAEMON_CLI_ARGS: usize = 16;
     const MAX_SOCKET_PATH_BYTES: usize = 107;
     const _: () = {
-        assert!(MAX_VSOCK_FRAME_BYTES > MAX_WIRE_PAYLOAD_BYTES);
+        assert!(MAX_VSOCK_FRAME_BYTES > MAX_WIRE_PAYLOAD_BYTES && nona_core::enclave_server::CMD_KMS_RECIPIENT_UNWRAP == 0x0007);
     };
 
     nona_core::enclave_server::harden_enclave_process();

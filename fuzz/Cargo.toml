@@ -26,3 +26,15 @@ name = "fuzz_ingest"
 path = "fuzz_targets/fuzz_ingest.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_c_abi_ffi"
+path = "fuzz_targets/fuzz_c_abi_ffi.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_kms_envelope"
+path = "fuzz_targets/fuzz_kms_envelope.rs"
+test = false
+doc = false
