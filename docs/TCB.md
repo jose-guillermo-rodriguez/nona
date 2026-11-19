@@ -31,12 +31,13 @@ Nona cryptographic core eliminates operating system and runtime dependencies:
 
 Nona formal proofs are machine-checked via Verus using Z3 with an explicit resource limit budget (rlimit = 1,000,000):
 
-- src/psi.rs (176 SMT Targets: 61 Lemmas + 115 Contracts): Zero-axiom 256-bit Solinas modular multiplication, radix-2^64 multi-limb carry/borrow chains, cross-radix bit projection, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, and Tier 3 algebraic/boundary invariants (total 229 global SMT targets: 80 inductive lemmas + 149 verified executive & boundary contracts)
+- src/psi.rs (176 SMT Targets: 61 Lemmas + 115 Contracts): Zero-axiom 256-bit Solinas modular multiplication, radix-2^64 multi-limb carry/borrow chains, cross-radix bit projection, complete homogeneous projective P^2 point addition & doubling (RCB 2016 Alg 4 complete addition), constant-time 256-bit scalar multiplication ladder, and Tier 3 algebraic/boundary invariants (total 291 global SMT targets: 103 inductive & reduction lemmas + 188 verified executive, boundary & reduction obligations)
 - src/obfuscation.rs (22 SMT Targets: 14 Lemmas + 8 Contracts): 4-round Feistel bijection, non-identity permutations, key diffusion (VERIF-01)
 - src/normalization.rs (9 SMT Targets: 9 Contract/Loop Targets): Monomorphic 64-byte bounded transformations, output delimiter elimination & zero-padding completeness
 - src/allocator.rs (2 SMT Targets: 2 Contract Targets): 64-byte pointer alignment preservation invariants and static arena safety
 - src/crypto.rs (3 SMT Targets: 2 Lemmas + 1 Contract): Ghost ChannelToken sequence monotonicity and branchless borrow-bit adaptive VOLE routing circuit (VERIF-03)
 - src/enclave_boundaries.rs (17 SMT Targets: 3 Lemmas + 14 Boundary Contracts): AWS Nitro `/dev/nsm` IOCTL/CBOR framing, monotonic enclave session operation ceiling, 64-byte vsock wire framing bijectivity, `CLOCK_MONOTONIC` & `recv_exact` syscall models, FFI spatial disjointness, 128-byte ring pre-flight framing, and branchless exception cursor advancement (ENCL-12)
+- proofs/crypto_reductions.rs (62 SMT Targets: 23 Reduction Lemmas + 39 Spec/Termination Obligations): Prime-order cyclic subgroup exponent algebra, constructive Extended Euclidean Bezout modular inverses, DH-PSI set-intersection soundness & completeness, DDH self-randomizability & strict non-DDH gap preservation, and 256-bit/64-bit XOR one-time-pad payload confidentiality & element-domain separation (verified fail-closed by `tools/fuzz_verus_specs.py`)
 
 ### High-Assurance Runtime Cryptographic Boundary (`src/crypto.rs`) [VERIF-03]
 Cryptographic components in `src/crypto.rs` are partitioned between the machine-checked core and the runtime perimeter:

@@ -1,18 +1,19 @@
 {
   "schema_version": "1.0.0",
   "active_release": "1.0.2",
-  "stage_gate": "track3-tcb-burndown",
+  "stage_gate": "track3-crypto-reductions-and-spec-fuzzing",
   "thresholds": {
-    "min_verified_smt_targets": 156,
+    "min_verified_smt_targets": 241,
     "max_external_body_axioms": 3,
     "max_stack_frame_bytes": 1408,
-    "min_hygiene_checks": 18
+    "min_hygiene_checks": 19
   },
   "gates": {
     "require_non_mutating_eif_manifest": true,
     "require_tla_model_check": true,
     "require_p2_timing_hard_gate": true,
     "require_assembly_spill_audit": true,
-    "require_kms_recipient_binding": false
+    "require_kms_recipient_binding": false,
+    "require_spec_fuzzing": true
   }
 }

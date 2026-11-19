@@ -29,6 +29,7 @@ REQUIRED_GATES = (
     "require_p2_timing_hard_gate",
     "require_assembly_spill_audit",
     "require_kms_recipient_binding",
+    "require_spec_fuzzing",
 )
 
 RUNTIME_ABI_EXCLUSIONS = {
@@ -45,7 +46,7 @@ def is_strict_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def validate_policy_schema(doc: object, label: str) -> dict:
+def validate_policy_schema(doc: object, label: str, *, is_baseline: bool = False) -> dict:
     if not isinstance(doc, dict):
         fail(f"{label} must be a JSON object.")
 
@@ -72,7 +73,12 @@ def validate_policy_schema(doc: object, label: str) -> dict:
     if not isinstance(gates, dict):
         fail(f"{label}.gates must be a JSON object.")
 
-    for key in REQUIRED_GATES:
+    required_gates = (
+        tuple(g for g in REQUIRED_GATES if g != "require_spec_fuzzing")
+        if is_baseline
+        else REQUIRED_GATES
+    )
+    for key in required_gates:
         if key not in gates:
             fail(f"{label}.gates missing required key '{key}'.")
         if not isinstance(gates[key], bool):
@@ -133,7 +139,7 @@ def verify_git_monotonicity(head_policy: dict) -> None:
     except json.JSONDecodeError as exc:
         fail(f"Invalid JSON in {baseline_ref}:assurance_policy.json: {exc}")
 
-    base_policy = validate_policy_schema(raw_base, f"{baseline_ref}:assurance_policy.json")
+    base_policy = validate_policy_schema(raw_base, f"{baseline_ref}:assurance_policy.json", is_baseline=True)
     base_t = base_policy["thresholds"]
     base_g = base_policy["gates"]
 
@@ -424,6 +430,16 @@ def verify_introspection_and_gates(policy: dict) -> None:
     else:
         print("  [*] Stage gate inactive: require_tla_model_check=false.")
 
+
+    # 4. Verus specification mutation fuzzing gate
+    if gates["require_spec_fuzzing"]:
+        fuzzer = Path("tools/fuzz_verus_specs.py")
+        if not fuzzer.is_file():
+            fail("gates.require_spec_fuzzing is true, but tools/fuzz_verus_specs.py is missing.")
+        makefile_text = Path("Makefile").read_text(encoding="utf-8") if Path("Makefile").is_file() else ""
+        if not re.search(r"^spec-fuzz:", makefile_text, re.M):
+            fail("gates.require_spec_fuzzing is true, but Makefile lacks 'spec-fuzz:' target.")
+        print("  ✓ Stage gate active: Verus specification mutation fuzzer enforced.")
 
 def main() -> None:
     policy_path = Path("assurance_policy.json")
