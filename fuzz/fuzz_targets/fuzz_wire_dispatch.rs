@@ -67,7 +67,7 @@ fn parse_runs_arg(default_runs: usize) -> usize {
 
 fn main() {
     let cycles = parse_runs_arg(100_000);
-    println!("[*] Launching Wire Dispatch Mutational Fuzzing (100,000 cycles)...");
+    println!("[*] Launching Wire Dispatch Mutational Fuzzing ({cycles} cycles)...");
 
     let mut state: u64 = 0x853c49e6748fea9b;
     let mut next_u64 = || {

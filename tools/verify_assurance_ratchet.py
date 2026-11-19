@@ -425,8 +425,11 @@ def verify_introspection_and_gates(policy: dict) -> None:
         tla_specs = sorted(Path("specs").glob("*.tla")) if Path("specs").is_dir() else []
         if not tla_specs:
             fail("gates.require_tla_model_check is true, but no specs/*.tla files exist.")
+        ci_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8") if Path(".github/workflows/ci.yml").is_file() else ""
+        if "verify-models" not in ci_text or "tla2tools.jar" not in ci_text:
+            fail("gates.require_tla_model_check is true, but .github/workflows/ci.yml does not execute TLC verify-models.")
         print(
-            f"  ✓ Stage gate active: discovered {len(tla_specs)} TLA+ specification(s): "
+            f"  ✓ Stage gate active: discovered {len(tla_specs)} TLA+ specification(s) & CI TLC model-check gate: "
             + ", ".join(str(p) for p in tla_specs)
         )
     else:

@@ -364,24 +364,14 @@ impl Scalar {
 
     #[inline(always)]
     pub unsafe fn from_bytes_le(ptr: *const u8) -> Self {
-        let mut limbs = [0u64; 4];
-        core::ptr::copy_nonoverlapping(ptr, limbs.as_mut_ptr().cast::<u8>(), 32);
-        limbs[0] = u64::from_le(limbs[0]);
-        limbs[1] = u64::from_le(limbs[1]);
-        limbs[2] = u64::from_le(limbs[2]);
-        limbs[3] = u64::from_le(limbs[3]);
-        Self { limbs }
+        Self {
+            limbs: limbs256_from_bytes_le(ptr),
+        }
     }
 
     #[inline(always)]
     pub unsafe fn to_bytes_le(&self, ptr: *mut u8) {
-        let limbs_le = [
-            self.limbs[0].to_le(),
-            self.limbs[1].to_le(),
-            self.limbs[2].to_le(),
-            self.limbs[3].to_le(),
-        ];
-        core::ptr::copy_nonoverlapping(limbs_le.as_ptr().cast::<u8>(), ptr, 32);
+        limbs256_to_bytes_le(&self.limbs, ptr);
     }
 
     pub fn add(&self, other: &Self) -> Self {
@@ -403,6 +393,26 @@ impl Scalar {
         let limbs = reduce_scalar_512(&r);
         Self { limbs }
     }
+}
+
+pub(crate) unsafe fn limbs256_from_bytes_le(ptr: *const u8) -> [u64; 4] {
+    let mut limbs = [0u64; 4];
+    core::ptr::copy_nonoverlapping(ptr, limbs.as_mut_ptr().cast::<u8>(), 32);
+    limbs[0] = u64::from_le(limbs[0]);
+    limbs[1] = u64::from_le(limbs[1]);
+    limbs[2] = u64::from_le(limbs[2]);
+    limbs[3] = u64::from_le(limbs[3]);
+    limbs
+}
+
+pub(crate) unsafe fn limbs256_to_bytes_le(limbs: &[u64; 4], ptr: *mut u8) {
+    let limbs_le = [
+        limbs[0].to_le(),
+        limbs[1].to_le(),
+        limbs[2].to_le(),
+        limbs[3].to_le(),
+    ];
+    core::ptr::copy_nonoverlapping(limbs_le.as_ptr().cast::<u8>(), ptr, 32);
 }
 
 /// Satisfies [FR-31-ADAPTVOLE]
@@ -1670,17 +1680,62 @@ mod tests {
         ];
         assert_eq!(digest, expected_abc);
 
-        // ECDSA-P384 sign & verify roundtrip
+        // Independent RFC 6979 Section A.2.6 ECDSA-P384 / SHA-384 KAT (message = b"sample")
+        let rfc6979_d: [u8; 48] = [
+            0x6b, 0x9d, 0x3d, 0xad, 0x2e, 0x1b, 0x8c, 0x1c, 0x05, 0xb1, 0x98, 0x75,
+            0xb6, 0x65, 0x9f, 0x4d, 0xe2, 0x3c, 0x3b, 0x66, 0x7b, 0xf2, 0x97, 0xba,
+            0x9a, 0xa4, 0x77, 0x40, 0x78, 0x71, 0x37, 0xd8, 0x96, 0xd5, 0x72, 0x4e,
+            0x4c, 0x70, 0xa8, 0x25, 0xf8, 0x72, 0xc9, 0xea, 0x60, 0xd2, 0xed, 0xf5,
+        ];
+        let rfc6979_ux: [u8; 48] = [
+            0xec, 0x3a, 0x4e, 0x41, 0x5b, 0x4e, 0x19, 0xa4, 0x56, 0x86, 0x18, 0x02,
+            0x9f, 0x42, 0x7f, 0xa5, 0xda, 0x9a, 0x8b, 0xc4, 0xae, 0x92, 0xe0, 0x2e,
+            0x06, 0xaa, 0xe5, 0x28, 0x6b, 0x30, 0x0c, 0x64, 0xde, 0xf8, 0xf0, 0xea,
+            0x90, 0x55, 0x86, 0x60, 0x64, 0xa2, 0x54, 0x51, 0x54, 0x80, 0xbc, 0x13,
+        ];
+        let rfc6979_uy: [u8; 48] = [
+            0x80, 0x15, 0xd9, 0xb7, 0x2d, 0x7d, 0x57, 0x24, 0x4e, 0xa8, 0xef, 0x9a,
+            0xc0, 0xc6, 0x21, 0x89, 0x67, 0x08, 0xa5, 0x93, 0x67, 0xf9, 0xdf, 0xb9,
+            0xf5, 0x4c, 0xa8, 0x4b, 0x3f, 0x1c, 0x9d, 0xb1, 0x28, 0x8b, 0x23, 0x1c,
+            0x3a, 0xe0, 0xd4, 0xfe, 0x73, 0x44, 0xfd, 0x25, 0x33, 0x26, 0x47, 0x20,
+        ];
+        let rfc6979_r: [u8; 48] = [
+            0x94, 0xed, 0xbb, 0x92, 0xa5, 0xec, 0xb8, 0xaa, 0xd4, 0x73, 0x6e, 0x56,
+            0xc6, 0x91, 0x91, 0x6b, 0x3f, 0x88, 0x14, 0x06, 0x66, 0xce, 0x9f, 0xa7,
+            0x3d, 0x64, 0xc4, 0xea, 0x95, 0xad, 0x13, 0x3c, 0x81, 0xa6, 0x48, 0x15,
+            0x2e, 0x44, 0xac, 0xf9, 0x6e, 0x36, 0xdd, 0x1e, 0x80, 0xfa, 0xbe, 0x46,
+        ];
+        let rfc6979_s: [u8; 48] = [
+            0x99, 0xef, 0x4a, 0xeb, 0x15, 0xf1, 0x78, 0xce, 0xa1, 0xfe, 0x40, 0xdb,
+            0x26, 0x03, 0x13, 0x8f, 0x13, 0x0e, 0x74, 0x0a, 0x19, 0x62, 0x45, 0x26,
+            0x20, 0x3b, 0x63, 0x51, 0xd0, 0xa3, 0xa9, 0x4f, 0xa3, 0x29, 0xc1, 0x45,
+            0x78, 0x6e, 0x67, 0x9e, 0x7b, 0x82, 0xc7, 0x1a, 0x38, 0x62, 0x8a, 0xc8,
+        ];
+
+        let kat_pubkey_opt = p384_public_key_from_private(&rfc6979_d);
+        assert!(kat_pubkey_opt.is_some(), "RFC 6979 P-384 private key must derive valid public key");
+        let Some(kat_pubkey) = kat_pubkey_opt else { return; };
+        assert_eq!(u384_to_be_bytes(&kat_pubkey.x.limbs), rfc6979_ux);
+        assert_eq!(u384_to_be_bytes(&kat_pubkey.y.limbs), rfc6979_uy);
+        assert!(
+            ecdsa_p384_verify(&kat_pubkey, b"sample", &rfc6979_r, &rfc6979_s),
+            "Independent RFC 6979 Section A.2.6 P-384 KAT signature must verify"
+        );
+        let mut bad_kat_r = rfc6979_r;
+        bad_kat_r[0] ^= 0x01;
+        assert!(!ecdsa_p384_verify(&kat_pubkey, b"sample", &bad_kat_r, &rfc6979_s));
+
+        // ECDSA-P384 sign & verify roundtrip (fail-closed on None, never silent return)
         let mut privkey = [0u8; 48];
         privkey[47] = 0x2a;
         privkey[0] = 0x19;
-        let Some(pubkey) = p384_public_key_from_private(&privkey) else {
-            return;
-        };
+        let pubkey_opt = p384_public_key_from_private(&privkey);
+        assert!(pubkey_opt.is_some(), "Valid non-zero P-384 scalar must derive public key");
+        let Some(pubkey) = pubkey_opt else { return; };
         let msg = b"Nona AWS Nitro Enclave COSE_Sign1 Sig_structure test";
-        let Some(sig) = ecdsa_p384_sign_deterministic(&privkey, msg) else {
-            return;
-        };
+        let sig_opt = ecdsa_p384_sign_deterministic(&privkey, msg);
+        assert!(sig_opt.is_some(), "Deterministic P-384 signing must produce signature");
+        let Some(sig) = sig_opt else { return; };
         let mut r = [0u8; 48];
         let mut s = [0u8; 48];
         r.copy_from_slice(&sig[..48]);
@@ -1755,22 +1810,10 @@ pub struct AttestedKeyEnvelope {
 }
 
 #[inline(never)]
-pub fn ct_eq_16_bytes(a: &[u8; 16], b: &[u8; 16]) -> u64 {
+pub fn ct_eq_fixed<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u64 {
     let mut d: u64 = 0;
     let mut i = 0;
-    while i < 16 {
-        d |= (a[i] ^ b[i]) as u64;
-        i += 1;
-    }
-    compiler_fence(Ordering::SeqCst);
-    ((d | 0u64.wrapping_sub(d)) >> 63) ^ 1
-}
-
-#[inline(never)]
-pub fn ct_eq_48_bytes(a: &[u8; 48], b: &[u8; 48]) -> u64 {
-    let mut d: u64 = 0;
-    let mut i = 0;
-    while i < 48 {
+    while i < N {
         d |= (a[i] ^ b[i]) as u64;
         i += 1;
     }
@@ -2020,9 +2063,9 @@ fn unwrap_attested_recipient_envelope_inner(
     if ct_eq_32_bytes(&envelope.challenge_nonce, expected_nonce) != 1 {
         return Err(AttestedEnvelopeError::NonceMismatch);
     }
-    let pcr_ok = ct_eq_48_bytes(&envelope.pcr0, expected_pcr0)
-        & ct_eq_48_bytes(&envelope.pcr1, expected_pcr1)
-        & ct_eq_48_bytes(&envelope.pcr2, expected_pcr2);
+    let pcr_ok = ct_eq_fixed(&envelope.pcr0, expected_pcr0)
+        & ct_eq_fixed(&envelope.pcr1, expected_pcr1)
+        & ct_eq_fixed(&envelope.pcr2, expected_pcr2);
     if pcr_ok != 1 {
         return Err(AttestedEnvelopeError::PcrMismatch);
     }
@@ -2057,7 +2100,7 @@ fn unwrap_attested_recipient_envelope_inner(
     let expected_tag = compute_attested_envelope_tag(&mac_key, recipient_pubkey, envelope);
     ct_zeroize(&mut mac_key);
 
-    if ct_eq_16_bytes(&expected_tag, &envelope.auth_tag) != 1 {
+    if ct_eq_fixed(&expected_tag, &envelope.auth_tag) != 1 {
         ct_zeroize(&mut enc_key);
         return Err(AttestedEnvelopeError::AuthenticationFailed);
     }
