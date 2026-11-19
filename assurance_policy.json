@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
-  "active_release": "1.0.1",
-  "stage_gate": "track2-microarch-hardening",
+  "active_release": "1.0.2",
+  "stage_gate": "track2-sealed",
   "thresholds": {
     "min_verified_smt_targets": 146,
     "max_external_body_axioms": 7,
