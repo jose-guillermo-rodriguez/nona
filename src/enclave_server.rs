@@ -1279,9 +1279,13 @@ pub fn dispatch_frame_with_slot(
             if !is_nsm_available() {
                 return (crate::attestation::NONA_ERR_NSM_UNAVAILABLE, 0);
             }
-            // Bind hypervisor attestation strictly to the internal enclave session public key.
-            // Private scalar never enters this frame.
-            let pubkey = get_or_create_session_pubkey();
+            // Bind hypervisor attestation to the single-use ephemeral KMS recipient public key
+            // (preserving deterministic pre-seeded test keys when already provisioned).
+            let pubkey = if SESSION_KEY.ephemeral_recipient_active.load(Ordering::Acquire) {
+                unsafe { *SESSION_KEY.ephemeral_pubkey.get() }
+            } else {
+                provision_ephemeral_recipient_keypair()
+            };
             if advance_session_op_counter().is_err() {
                 return (-1, 0);
             }
@@ -1290,6 +1294,21 @@ pub fn dispatch_frame_with_slot(
             let status = unsafe {
                 query_hardware_attestation_with_nonce(&user_data_digest, client_nonce, attestation_doc)
             };
+
+            #[cfg(feature = "std")]
+            if status == 0
+                && !EXPECTED_PCR_POLICY.configured.load(Ordering::Acquire)
+                && attestation_doc.actual_len > 0
+                && attestation_doc.actual_len <= ATTESTATION_MAX_DOC_SIZE
+            {
+                if let Ok(pcrs) =
+                    crate::client::NonaClient::extract_cose_attestation_pcrs(
+                        &attestation_doc.data[..attestation_doc.actual_len],
+                    )
+                {
+                    configure_expected_pcr_policy(&pcrs.pcr0, &pcrs.pcr1, &pcrs.pcr2);
+                }
+            }
 
             let (status, out_len) = if status == 0 {
                 let Some(total_needed) =
