@@ -397,6 +397,10 @@ if grep -rnE '\b(SPEC|ENCL|HAVH)-[0-9]+\b' docs/EXTERNAL_AUDIT_DOSSIER.md 2>/dev
     echo "  [!] FAIL: Internal tracking codes detected in docs/EXTERNAL_AUDIT_DOSSIER.md."
     exit 1
 fi
+if ! grep -Eq '^EXTENDS[[:space:]]+.*Integers' specs/vsock_session.tla; then
+    echo "  [!] FAIL: specs/vsock_session.tla must EXTEND Integers to support signed wire status codes (-1)."
+    exit 1
+fi
 echo "  ✓ External cryptanalysis readiness dossier and audit bundle verified."
 echo "=========================================================="
 echo "ALL CODE REVIEW & HYGIENE CHECKS PASSED: REPOSITORY CLEAN"

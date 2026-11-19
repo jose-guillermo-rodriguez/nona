@@ -15,7 +15,7 @@
 (*     and out-of-phase command injection                                  *)
 (*   - Fail-closed abort with deterministic key & buffer zeroization       *)
 (***************************************************************************)
-EXTENDS Naturals, Sequences, FiniteSets
+EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
     MaxSessionOps,      \* Monotonic operation ceiling per ephemeral session key
