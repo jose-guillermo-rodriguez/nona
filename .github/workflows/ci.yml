@@ -124,6 +124,15 @@ jobs:
           chmod +x ./tools/run_verus_safe.sh
           ./tools/run_verus_safe.sh --native-host
 
+      - name: Cache & Execute TLA+ TLC Model Checker (specs/vsock_session.tla)
+        run: |
+          mkdir -p ~/.tla
+          if [ ! -f ~/.tla/tla2tools.jar ]; then
+            curl -sSL "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar" -o ~/.tla/tla2tools.jar
+          fi
+          java -version
+          TLA2TOOLS_JAR=~/.tla/tla2tools.jar make verify-models
+
   # ==========================================================================
   # JOB 2: Static Musl Compilation & Zero-Heap Dynamic Symbol Audit
   # ==========================================================================

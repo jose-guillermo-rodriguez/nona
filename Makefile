@@ -69,7 +69,7 @@ verify-models:
 		echo "  [*] Executing TLC model checker via $$TLC_JAR..."; \
 		java -XX:+UseParallelGC -cp "$$TLC_JAR" tlc2.TLC -workers auto -cleanup -config specs/vsock_session.cfg specs/vsock_session.tla; \
 	else \
-		echo "  [*] TLC binary/JAR not installed on workstation; executing structural TLA+ & TLC config validator..."; \
+		echo "  [*] TLC not installed locally; running static TLA+ formula preflight (full TLC state-space check enforced in CI)..."; \
 		python3 -c "import pathlib, re; tla = pathlib.Path('specs/vsock_session.tla').read_text(encoding='utf-8'); cfg = pathlib.Path('specs/vsock_session.cfg').read_text(encoding='utf-8'); assert re.search(r'^----[ ]*MODULE[ ]+vsock_session[ ]*----', tla, re.M), 'Missing MODULE header'; assert re.search(r'^====', tla, re.M), 'Missing module footer'; req = ['Init', 'Next', 'Spec', 'TypeInvariant', 'DeadlockFreedom', 'SafetyPhaseMonotonicity', 'SafetyFailClosedZeroization', 'SessionCompleteness', 'LivelockFreedom']; miss = [s for s in req if not re.search(r'^[ ]*' + s + r'[ ]*==', tla, re.M)]; assert not miss, f'Missing TLA+ definitions: {miss}'; syms = re.findall(r'^(?:SPECIFICATION|INVARIANT|PROPERTY)[ ]+([A-Za-z0-9_]+)', cfg, re.M); undef = [s for s in syms if not re.search(r'^[ ]*' + s + r'[ ]*==', tla, re.M)]; assert not undef, f'Undefined TLC symbols: {undef}'; print(f'  ✓ Structural TLA+ & TLC config validation passed ({len(syms)} checked formulas, {len(tla.splitlines())} lines).')"; \
 	fi
 
@@ -85,7 +85,7 @@ fuzz-smoke:
 	@echo "[HOST] Compiling all 4 continuous fuzz targets (fuzz_ingest, fuzz_wire_dispatch, fuzz_c_abi_ffi, fuzz_kms_envelope)..."
 	cargo build --bins --features std
 	@HOST_TRIPLE=$$(rustc -vV | awk '/^host:/ {print $$2}'); \
-	if cargo +nightly --version >/dev/null 2>&1; then \
+	if cargo +nightly --version >/dev/null 2>&1 && RUSTFLAGS="-Z sanitizer=address" cargo +nightly check --bins --features std --target "$$HOST_TRIPLE" >/dev/null 2>&1; then \
 		echo "[HOST] Executing bounded ASan+SanCov continuous fuzzing smoke pass on $$HOST_TRIPLE (-runs=256 -max_len=4096)..."; \
 		RUSTFLAGS="-Z sanitizer=address -C passes=sancov-module -C llvm-args=-sanitizer-coverage-level=4 -C llvm-args=-sanitizer-coverage-inline-8bit-counters -C llvm-args=-sanitizer-coverage-pc-table" \
 			cargo +nightly build --bins --features std --target "$$HOST_TRIPLE" --target-dir target/fuzz-nightly; \
